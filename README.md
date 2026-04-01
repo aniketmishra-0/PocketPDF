@@ -1,28 +1,50 @@
-# PDF ZIP & Compress
+# Pocket PDF
 
-This Android app lets you:
+Pocket PDF is an offline-first Android PDF utility focused on fast reading, lightweight editing, ZIP export, cleanup, and compression.
 
-- choose a PDF from your phone
-- open the PDF offline inside the app
-- run a preflight check to inspect page sizes and orientation
-- remove first pages, last pages, or selected pages
-- convert the remaining pages into numbered PNG, JPG, or JPEG images
-- save those images inside one ZIP file
-- create a smaller offline PDF copy of the selected pages
-- normalize compressed pages to one target size with fit or stretch modes
+## Highlights
 
-## Build
+- Open and read PDFs fully offline
+- Visual PDF edit with text, drawing, highlights, and image overlays
+- Resume previous edit sessions
+- Export selected pages as JPG, JPEG, or PNG inside one ZIP
+- Remove pages visually before export
+- Compress PDFs offline
+- Run preflight checks for page size and orientation issues
 
-1. Install Android Studio with the Android SDK.
-2. Install JDK 17 if Android Studio does not provide it automatically.
-3. Open this folder in Android Studio.
-4. Let Gradle sync.
-5. Build the APK from the `app` module.
+## Latest APK
 
-## Notes
+The latest tracked APK is included in this repository:
 
-- The app uses Android's built-in `PdfRenderer`, so it does not need extra storage permissions.
-- PDF viewing, ZIP export, and compression all work fully offline.
-- ZIP export supports PNG, JPG, and JPEG output.
-- PDF compression works fully offline and rebuilds the output as an image-based PDF.
-- Preflight lets you inspect page sizes and apply page-size normalization to compressed PDFs.
+- [PocketPDF.apk](./PocketPDF.apk)
+
+## Project Structure
+
+- [app/](./app): Android application source
+- [browser-preview/](./browser-preview): lightweight preview assets
+- [sample-reader-test.pdf](./sample-reader-test.pdf): sample file for local testing
+
+## Build Locally
+
+1. Install Android Studio with Android SDK support.
+2. Use JDK 17.
+3. Open this folder in Android Studio or use Gradle from the terminal.
+4. Run `./gradlew assembleDebug`.
+
+The debug APK will be generated at:
+
+- `app/build/outputs/apk/debug/app-debug.apk`
+
+## Contributing
+
+Contributions are welcome. Please read:
+
+- [CONTRIBUTING.md](./CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
+- [SECURITY.md](./SECURITY.md)
+
+## License
+
+This project is licensed under the MIT License.
+
+- [LICENSE](./LICENSE)

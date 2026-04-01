@@ -10,6 +10,7 @@ keystore.properties
 *.keystore
 *.apk
 *.aab
+!PocketPDF.apk
 build/
 app/build/
 captures/
