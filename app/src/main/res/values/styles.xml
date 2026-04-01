@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Widget.PDFZipExporter.TextInputLayout" parent="Widget.Material3.TextInputLayout.OutlinedBox">
+        <item name="boxBackgroundColor">@color/input_surface</item>
+        <item name="boxCornerRadiusTopStart">14dp</item>
+        <item name="boxCornerRadiusTopEnd">14dp</item>
+        <item name="boxCornerRadiusBottomStart">14dp</item>
+        <item name="boxCornerRadiusBottomEnd">14dp</item>
+        <item name="boxStrokeColor">@color/input_stroke</item>
+        <item name="boxStrokeWidth">1dp</item>
+        <item name="boxStrokeWidthFocused">2dp</item>
+        <item name="hintTextColor">@color/body_text</item>
+        <item name="android:textColorHint">@color/body_text</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.PDFZipExporter.Input</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Dropdown" parent="Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu">
+        <item name="boxBackgroundColor">@color/input_surface</item>
+        <item name="boxCornerRadiusTopStart">14dp</item>
+        <item name="boxCornerRadiusTopEnd">14dp</item>
+        <item name="boxCornerRadiusBottomStart">14dp</item>
+        <item name="boxCornerRadiusBottomEnd">14dp</item>
+        <item name="boxStrokeColor">@color/input_stroke</item>
+        <item name="boxStrokeWidth">1dp</item>
+        <item name="boxStrokeWidthFocused">2dp</item>
+        <item name="hintTextColor">@color/body_text</item>
+        <item name="android:textColorHint">@color/body_text</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.PDFZipExporter.Input</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.Primary" parent="Widget.Material3.Button">
+        <item name="backgroundTint">@color/progress_color</item>
+        <item name="cornerRadius">18dp</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="iconTint">@android:color/white</item>
+        <item name="android:textStyle">bold</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.Secondary" parent="Widget.Material3.Button.TonalButton">
+        <item name="backgroundTint">@color/button_secondary_bg</item>
+        <item name="cornerRadius">14dp</item>
+        <item name="android:textColor">@color/button_secondary_text</item>
+        <item name="iconTint">@color/button_secondary_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.HeroPrimary" parent="Widget.Material3.Button">
+        <item name="backgroundTint">@android:color/white</item>
+        <item name="cornerRadius">18dp</item>
+        <item name="android:textColor">@color/progress_color</item>
+        <item name="iconTint">@color/progress_color</item>
+        <item name="android:textStyle">bold</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.HeroSecondary" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="backgroundTint">#1FFFFFFF</item>
+        <item name="strokeColor">#55FFFFFF</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="cornerRadius">18dp</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="iconTint">@android:color/white</item>
+        <item name="android:textStyle">bold</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.Outline" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="strokeColor">@color/button_outline_stroke</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="cornerRadius">14dp</item>
+        <item name="android:textColor">@color/title_text</item>
+        <item name="iconTint">@color/title_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.MiniTool" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="backgroundTint">@color/card_surface</item>
+        <item name="strokeColor">@color/card_stroke</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="cornerRadius">18dp</item>
+        <item name="android:textColor">@color/title_text</item>
+        <item name="iconTint">@color/title_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="iconPadding">8dp</item>
+        <item name="iconSize">16dp</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">42dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.Tile" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="backgroundTint">@color/card_surface</item>
+        <item name="strokeColor">@color/card_stroke</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="cornerRadius">28dp</item>
+        <item name="android:textColor">@color/title_text</item>
+        <item name="iconTint">@color/title_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="elevation">0dp</item>
+        <item name="android:minHeight">116dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.Tile.Primary" parent="Widget.PDFZipExporter.Button.Tile">
+        <item name="backgroundTint">@color/progress_color</item>
+        <item name="strokeColor">@color/progress_color</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="iconTint">@android:color/white</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Button.Toggle" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="cornerRadius">12dp</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="strokeColor">@color/toggle_button_stroke</item>
+        <item name="android:textColor">@color/toggle_button_text</item>
+        <item name="iconTint">@color/toggle_button_text</item>
+        <item name="backgroundTint">@color/toggle_button_bg</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <style name="Widget.PDFZipExporter.Chip.Filter" parent="Widget.Material3.Chip.Filter">
+        <item name="chipBackgroundColor">@color/chip_filter_bg</item>
+        <item name="chipStrokeColor">@color/chip_filter_stroke</item>
+        <item name="chipStrokeWidth">1dp</item>
+        <item name="chipCornerRadius">14dp</item>
+        <item name="android:textColor">@color/chip_filter_text</item>
+        <item name="checkedIconVisible">false</item>
+        <item name="ensureMinTouchTargetSize">true</item>
+    </style>
+
+    <style name="ShapeAppearance.PDFZipExporter.Input" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">14dp</item>
+    </style>
+</resources>

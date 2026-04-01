@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF ZIP & Compress Preview</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <main class="page-shell">
+        <section class="device-frame">
+            <div class="device-glow"></div>
+            <div class="app-surface">
+                <header class="hero-copy">
+                    <p class="eyebrow">Chrome Preview</p>
+                    <h1>PDF ZIP &amp; Compress</h1>
+                    <p class="subtitle">
+                        Pick any PDF, optionally remove pages, then either export images in a ZIP
+                        or save a smaller offline PDF copy.
+                    </p>
+                </header>
+
+                <section class="info-card">
+                    <div class="card-section">
+                        <h2>How it works</h2>
+                        <p>
+                            This browser preview mirrors the Android screen and lets us test the
+                            main flow before we go back to APK testing.
+                        </p>
+                    </div>
+
+                    <div class="status-panel">
+                        <p class="selected-file" id="selectedPdfText">No PDF selected yet.</p>
+                        <p class="status-copy" id="statusText">Choose a PDF to begin.</p>
+                        <div class="progress-track hidden" id="progressIndicator" aria-hidden="true">
+                            <span class="progress-bar"></span>
+                        </div>
+                        <div class="meta-row">
+                            <span id="pageCountBadge" class="meta-badge hidden"></span>
+                            <span id="modeBadge" class="meta-badge hidden"></span>
+                        </div>
+                    </div>
+
+                    <div class="card-section">
+                        <h3>Optional Page Removal</h3>
+                        <p>
+                            Remove pages from the start, the end, or by specific page numbers
+                            before creating the ZIP or compressed PDF.
+                        </p>
+                    </div>
+
+                    <div class="field-grid">
+                        <label class="field">
+                            <span>Remove first pages</span>
+                            <input id="skipFirstInput" type="number" min="0" inputmode="numeric" placeholder="0">
+                        </label>
+
+                        <label class="field">
+                            <span>Remove last pages</span>
+                            <input id="skipLastInput" type="number" min="0" inputmode="numeric" placeholder="0">
+                        </label>
+
+                        <label class="field field-full">
+                            <span>Remove specific pages</span>
+                            <input id="removePagesInput" type="text" placeholder="Examples: 1, 2, 8 or 10-12">
+                            <small>Examples: 1, 2, 8 or ranges like 10-12</small>
+                        </label>
+                    </div>
+
+                    <div class="card-section">
+                        <h3>Output Settings</h3>
+                        <p>
+                            Choose the image format for your ZIP export. JPG and JPEG also support
+                            quality settings.
+                        </p>
+                    </div>
+
+                    <div class="field-grid">
+                        <label class="field">
+                            <span>Image format</span>
+                            <select id="imageFormatInput">
+                                <option value="PNG">PNG</option>
+                                <option value="JPG">JPG</option>
+                                <option value="JPEG">JPEG</option>
+                            </select>
+                        </label>
+
+                        <label class="field hidden" id="jpegQualityLayout">
+                            <span>JPG or JPEG quality</span>
+                            <input id="jpegQualityInput" type="number" min="1" max="100" inputmode="numeric" value="82" placeholder="82">
+                            <small>Enter a value from 1 to 100. Higher value means better quality and larger file size.</small>
+                        </label>
+                    </div>
+
+                    <div class="action-stack">
+                        <input id="pdfFileInput" type="file" accept="application/pdf" hidden>
+                        <button id="pickPdfButton" class="btn btn-primary" type="button">Choose PDF</button>
+                        <button id="exportZipButton" class="btn btn-secondary" type="button" disabled>Create ZIP</button>
+                        <button id="compressPdfButton" class="btn btn-outline" type="button" disabled>Compress PDF</button>
+                    </div>
+
+                    <p class="footnote">
+                        Compression happens fully offline in this preview too. ZIP output uses the
+                        selected image format; compressed PDF output uses image pages for a quick
+                        browser-side approximation of the Android flow.
+                    </p>
+                </section>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js"></script>
+    <script src="./app.js"></script>
+</body>
+</html>
