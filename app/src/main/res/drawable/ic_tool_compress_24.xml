@@ -4,7 +4,11 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+    <!-- Download/compress arrow icon matching mockup -->
     <path
-        android:fillColor="@android:color/white"
-        android:pathData="M4,5h16v2H4zM4,9h11v2H4zM8,13h7v2H8zM11,12h2v5h3l-4,4 -4,-4h3z" />
+        android:fillColor="#FF000000"
+        android:pathData="M19,9h-4V3H9v6H5l7,7 7,-7z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M5,18v2h14v-2H5z" />
 </vector>

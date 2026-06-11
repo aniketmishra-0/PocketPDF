@@ -4,7 +4,7 @@
     <corners
         android:topLeftRadius="20dp"
         android:topRightRadius="20dp" />
-    <solid android:color="@color/card_surface_strong" />
+    <solid android:color="@color/background_start" />
     <stroke
         android:width="1dp"
         android:color="@color/card_stroke" />

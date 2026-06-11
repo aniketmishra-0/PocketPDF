@@ -15,6 +15,10 @@ class LockableRecyclerView @JvmOverloads constructor(
         if (!userScrollEnabled) {
             return false
         }
+        if (e.pointerCount > 1) {
+            requestDisallowInterceptTouchEvent(true)
+            return false
+        }
         return super.onInterceptTouchEvent(e)
     }
 

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.PDFZipExporter" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Base.Theme.PDFZipExporter" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
@@ -10,4 +10,6 @@
         <item name="colorSecondary">@color/button_secondary_text</item>
         <item name="colorSurface">@color/card_surface</item>
     </style>
+
+    <style name="Theme.PDFZipExporter" parent="Base.Theme.PDFZipExporter" />
 </resources>

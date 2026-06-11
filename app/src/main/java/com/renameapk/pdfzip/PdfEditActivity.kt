@@ -11,10 +11,8 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.Matrix
-import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import android.text.InputType
 import android.util.LruCache
 import android.view.Gravity
@@ -22,6 +20,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.ViewGroup
+import android.view.View
 import android.view.WindowManager
 import android.widget.SeekBar
 import android.widget.Toast
@@ -40,6 +39,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.GridLayoutManager
+import com.renameapk.pdfzip.databinding.SheetViewerPagesGridBinding
+import com.renameapk.pdfzip.databinding.SheetDeletePageConfirmBinding
+import com.renameapk.pdfzip.databinding.ItemPdfGridPageBinding
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.chip.Chip
@@ -54,6 +57,7 @@ import com.renameapk.pdfzip.databinding.ItemReorderPageBinding
 import com.renameapk.pdfzip.databinding.SheetPdfEditToolsBinding
 import com.renameapk.pdfzip.databinding.SheetReorderPagesBinding
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
@@ -79,13 +83,9 @@ import java.io.OutputStream
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 class PdfEditActivity : AppCompatActivity() {
-
-    private data class OpenedPdf(
-        val fileDescriptor: ParcelFileDescriptor,
-        val renderer: PdfRenderer
-    )
 
     private data class TextColorChoice(
         val chipId: Int,
@@ -114,12 +114,12 @@ class PdfEditActivity : AppCompatActivity() {
     private var requestedPdfUri: Uri? = null
     private var projectSourceUri: Uri? = null
     private var pdfName: String = ""
-    private var fileDescriptor: ParcelFileDescriptor? = null
-    private var renderer: PdfRenderer? = null
+    private var renderer: PdfiumPageRenderer? = null
     private var originalPageCount: Int = 0
     private var pageCount: Int = 0
     private var currentPageIndex: Int = 0
     private var selectionOnlyMode: Boolean = false
+    private var startInReorderMode: Boolean = false
     private var isPageSeekBarTracking: Boolean = false
     private var renderJob: Job? = null
     private var initialRemovedPages: Set<Int> = emptySet()
@@ -146,6 +146,7 @@ class PdfEditActivity : AppCompatActivity() {
     private var scrollBasePaddingTop = 0
     private var scrollBasePaddingRight = 0
     private var scrollBasePaddingBottom = 0
+    private var zoomButtonsBaseMarginBottom = 0
     private var canvasBaseWidth = 0
     private var canvasBaseHeight = 0
     private var canvasZoomScale = 1f
@@ -159,6 +160,58 @@ class PdfEditActivity : AppCompatActivity() {
     private val pageBitmapCache = object : LruCache<Int, Bitmap>(EDITOR_PAGE_CACHE_SIZE_KB) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.allocationByteCount / 1024
     }
+
+    private val thumbnailCacheSizeKb = (Runtime.getRuntime().maxMemory() / 1024 / 24)
+    private val thumbnailCache = object : LruCache<String, Bitmap>(thumbnailCacheSizeKb.toInt()) {
+        override fun sizeOf(key: String, value: Bitmap): Int {
+            return value.byteCount / 1024
+        }
+    }
+
+    private fun getPageCacheKey(entry: EditorPageEntry): String {
+        return when (entry) {
+            is EditorPageEntry.Original -> "o_${entry.originalIndex}"
+            is EditorPageEntry.Inserted -> "i_${entry.page.id}"
+        }
+    }
+
+    private suspend fun renderThumbnailBitmap(entry: EditorPageEntry): Bitmap {
+        val key = getPageCacheKey(entry)
+        thumbnailCache.get(key)?.takeIf { !it.isRecycled }?.let { return it }
+
+        return withContext(Dispatchers.IO) {
+            renderMutex.withLock {
+                thumbnailCache.get(key)?.takeIf { !it.isRecycled }?.let { return@withLock it }
+                val bitmap = when (entry) {
+                    is EditorPageEntry.Original -> {
+                        val activeRenderer = renderer ?: throw IOException("Renderer not initialized")
+                        activeRenderer.renderPage(
+                            pageIndex = entry.originalIndex,
+                            targetWidth = 220f,
+                            maxDimension = 420f,
+                            maxPixels = maxExportBitmapPixels,
+                        )
+                    }
+                    is EditorPageEntry.Inserted -> {
+                        renderInsertedPageBitmap(
+                            insertedPage = entry.page,
+                            maxDimension = 420f
+                        )
+                    }
+                }
+                thumbnailCache.put(key, bitmap)
+                bitmap
+            }
+        }
+    }
+
+    // Hard ceiling for the pixel count of a single page bitmap rendered during
+    // export. Scales with the available heap so a large or high-DPI page can
+    // never allocate enough memory to OOM-kill the process. This is the same
+    // strategy the viewer uses and prevents both the export crash and the
+    // "Could not render this page" failures caused by oversized output pages.
+    private val maxExportBitmapPixels = (Runtime.getRuntime().maxMemory() / 8 / 4)
+        .coerceIn(2_000_000L, 8_000_000L)
 
     private val createEditedPdfLauncher =
         registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -228,21 +281,12 @@ class PdfEditActivity : AppCompatActivity() {
         super.onStop()
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) {
-                handleEditorBackPressed()
-            }
-            return true
-        }
-        return super.dispatchKeyEvent(event)
-    }
-
     private fun resolveIntentData(intent: Intent) {
         val incomingUri = intent.data ?: intent.getStringExtra(EXTRA_PDF_URI)?.let(Uri::parse)
         requestedPdfUri = incomingUri
         pdfUri = incomingUri
         selectionOnlyMode = intent.getBooleanExtra(EXTRA_SELECTION_ONLY, false)
+        startInReorderMode = intent.getBooleanExtra(EXTRA_START_REORDER, false)
         initialRemovedPages = intent
             .getIntegerArrayListExtra(EXTRA_INITIAL_REMOVED_PAGES)
             .orEmpty()
@@ -293,6 +337,7 @@ class PdfEditActivity : AppCompatActivity() {
         scrollBasePaddingTop = binding.editScrollView.paddingTop
         scrollBasePaddingRight = binding.editScrollView.paddingRight
         scrollBasePaddingBottom = binding.editScrollView.paddingBottom
+        zoomButtonsBaseMarginBottom = (binding.editZoomButtons.layoutParams as ViewGroup.MarginLayoutParams).bottomMargin
     }
 
     private fun setupWindowInsets() {
@@ -327,16 +372,19 @@ class PdfEditActivity : AppCompatActivity() {
                     val canScale = canvasBaseWidth > 0 && canvasBaseHeight > 0
                     isCanvasScaleGestureActive = canScale
                     if (canScale) {
+                        binding.editOverlay.resetActiveGestures()
                         binding.editPageImage.parent?.requestDisallowInterceptTouchEvent(true)
                     }
                     return canScale
                 }
 
                 override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val canvasFocusX = detector.focusX + binding.editHorizontalScrollView.scrollX
+                    val canvasFocusY = detector.focusY + binding.editScrollView.scrollY
                     return adjustCanvasZoom(
                         scaleFactor = detector.scaleFactor,
-                        focusX = detector.focusX,
-                        focusY = detector.focusY
+                        focusX = canvasFocusX,
+                        focusY = canvasFocusY
                     )
                 }
 
@@ -347,9 +395,12 @@ class PdfEditActivity : AppCompatActivity() {
             }
         )
 
-        binding.editPageImage.setOnTouchListener { _, event ->
+        val scrollTouchListener = View.OnTouchListener { _, event ->
             handleCanvasScaleTouch(event)
         }
+        binding.editScrollView.setOnTouchListener(scrollTouchListener)
+        binding.editHorizontalScrollView.setOnTouchListener(scrollTouchListener)
+
         binding.editZoomInButton.setOnClickListener {
             zoomCanvasUsingButtons(CANVAS_BUTTON_ZOOM_STEP)
         }
@@ -399,7 +450,7 @@ class PdfEditActivity : AppCompatActivity() {
             return false
         }
         val updatedScale = (canvasZoomScale * scaleFactor).coerceIn(canvasMinZoomScale, MAX_CANVAS_ZOOM)
-        if (kotlin.math.abs(updatedScale - canvasZoomScale) < CANVAS_SCALE_EPSILON) {
+        if (updatedScale == canvasZoomScale) {
             return false
         }
         val zoomAnchor = buildCanvasZoomAnchor(focusX = focusX, focusY = focusY)
@@ -525,11 +576,7 @@ class PdfEditActivity : AppCompatActivity() {
         } else {
             Gravity.START
         }
-        val verticalGravity = if (scaledHeight < viewportHeight) {
-            Gravity.CENTER_VERTICAL
-        } else {
-            Gravity.TOP
-        }
+        val verticalGravity = Gravity.TOP
         return horizontalGravity or verticalGravity
     }
 
@@ -800,6 +847,7 @@ class PdfEditActivity : AppCompatActivity() {
         binding.editNavigationCard.isVisible = true
         binding.editJumpRow.isVisible = true
         binding.editToolsCard.isVisible = !selectionOnlyMode
+        binding.editReorderButtonContainer.isVisible = !selectionOnlyMode
         binding.editSelectedCard.isVisible = false
         binding.editActionsCard.isVisible = selectionOnlyMode
         binding.selectionOnlyStatusText.isVisible = selectionOnlyMode
@@ -907,6 +955,9 @@ class PdfEditActivity : AppCompatActivity() {
         binding.moreToolsButton.setOnClickListener {
             showMoreToolsSheet()
         }
+        binding.editReorderButton.setOnClickListener {
+            showReorderPagesSheet()
+        }
         binding.deletePageButton.setOnClickListener {
             toggleDeleteCurrentPage()
         }
@@ -923,6 +974,12 @@ class PdfEditActivity : AppCompatActivity() {
         binding.toggleBoldButton.setOnClickListener {
             if (binding.editOverlay.toggleSelectedTextBold()) {
                 updateSelectionControls()
+            }
+        }
+        binding.selectedDeleteButton.setOnClickListener {
+            if (binding.editOverlay.deleteSelectedElement()) {
+                updateSelectionControls()
+                updateActionAvailability()
             }
         }
         binding.undoEditButton.setOnClickListener {
@@ -960,10 +1017,9 @@ class PdfEditActivity : AppCompatActivity() {
                 runCatching { openPdf() }
             }
 
-            result.onSuccess { openedPdf ->
-                fileDescriptor = openedPdf.fileDescriptor
-                renderer = openedPdf.renderer
-                originalPageCount = openedPdf.renderer.pageCount
+            result.onSuccess { openedRenderer ->
+                renderer = openedRenderer
+                originalPageCount = openedRenderer.pageCount
                 pageCount = originalPageCount
                 binding.editPageSeekBar.max = (pageCount - 1).coerceAtLeast(0)
                 binding.editPageSeekBar.progress = 0
@@ -984,9 +1040,14 @@ class PdfEditActivity : AppCompatActivity() {
                 binding.editErrorText.isVisible = false
                 binding.editScrollView.isVisible = true
                 binding.editControlsPanel.isVisible = true
-                pageBitmapCache.evictAll()
                 showPage(0)
                 hasUnsavedDraftChanges = false
+                if (startInReorderMode) {
+                    startInReorderMode = false
+                    binding.root.post {
+                        showReorderPagesSheet()
+                    }
+                }
                 when {
                     restoredDraft -> showMessage(getString(R.string.visual_edit_draft_restored))
                     restoredProject != null -> showMessage(getString(R.string.visual_edit_restore_success))
@@ -1006,7 +1067,7 @@ class PdfEditActivity : AppCompatActivity() {
         }
     }
 
-    private fun openPdf(): OpenedPdf {
+    private suspend fun openPdf(): PdfiumPageRenderer {
         val requestedUri = requestedPdfUri ?: pdfUri ?: throw IOException(getString(R.string.cannot_open_pdf))
         if (!selectionOnlyMode && projectSourceUri != null) {
             val sourceUri = projectSourceUri ?: requestedUri
@@ -1024,25 +1085,26 @@ class PdfEditActivity : AppCompatActivity() {
         return openPdfFromUri(requestedUri)
     }
 
-    private fun openPdfFromUri(inputUri: Uri): OpenedPdf {
-        val localPdf = LocalPdfStore.prepareForRead(this, inputUri, pdfName)
-        requestedPdfUri = if (requestedPdfUri == inputUri) localPdf.uri else requestedPdfUri
-        projectSourceUri = if (projectSourceUri == inputUri) localPdf.uri else projectSourceUri
-        pdfUri = localPdf.uri
+    private suspend fun openPdfFromUri(inputUri: Uri): PdfiumPageRenderer {
+        // Zero-copy: render straight from the source. No full-file duplication
+        // into internal storage, so 800 MB - 1 GB documents open instantly.
+        pdfUri = inputUri
         if (pdfName.isBlank()) {
-            pdfName = localPdf.displayName
+            pdfName = LocalPdfStore.queryDisplayName(this, inputUri).orEmpty()
         }
-        val descriptor = ParcelFileDescriptor.open(
-            localPdf.file,
-            ParcelFileDescriptor.MODE_READ_ONLY
-        ) ?: throw IOException(getString(R.string.cannot_open_pdf))
-        val pdfRenderer = PdfRenderer(descriptor)
-        if (pdfRenderer.pageCount == 0) {
-            pdfRenderer.close()
-            descriptor.close()
+        val descriptor = LocalPdfStore.openSourceDescriptor(this, inputUri)
+            ?: throw IOException(getString(R.string.cannot_open_pdf))
+        val pageRenderer = try {
+            PdfiumPageRenderer.open(descriptor)
+        } catch (error: Throwable) {
+            runCatching { descriptor.close() }
+            throw IOException(getString(R.string.cannot_open_pdf), error)
+        }
+        if (pageRenderer.pageCount == 0) {
+            pageRenderer.close()
             throw IOException(getString(R.string.empty_pdf))
         }
-        return OpenedPdf(descriptor, pdfRenderer)
+        return pageRenderer
     }
 
     private fun applyRestoredProjectState() {
@@ -1114,22 +1176,12 @@ class PdfEditActivity : AppCompatActivity() {
                         (resources.displayMetrics.density * 24f)
                     ).coerceAtLeast(resources.displayMetrics.widthPixels * 0.7f) *
                     EDITOR_RENDER_QUALITY_MULTIPLIER
-                activeRenderer.openPage(originalPageIndex).use { page ->
-                    val widthScale = targetWidth / page.width.toFloat().coerceAtLeast(1f)
-                    val currentMax = max(page.width, page.height).toFloat().coerceAtLeast(1f)
-                    val maxSafeScale = PAGE_RENDER_MAX_DIMENSION / currentMax
-                    val renderScale = min(EDITOR_MAX_RENDER_SCALE, min(widthScale, maxSafeScale))
-                    val width = (page.width * renderScale).roundToInt().coerceAtLeast(1)
-                    val height = (page.height * renderScale).roundToInt().coerceAtLeast(1)
-                    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                    val canvas = Canvas(bitmap)
-                    canvas.drawColor(Color.WHITE)
-                    val matrix = Matrix().apply {
-                        postScale(renderScale, renderScale)
-                    }
-                    page.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    bitmap
-                }
+                activeRenderer.renderPage(
+                    pageIndex = originalPageIndex,
+                    targetWidth = targetWidth,
+                    maxDimension = PAGE_RENDER_MAX_DIMENSION,
+                    maxPixels = maxExportBitmapPixels,
+                )
             }
         }
     }
@@ -1253,13 +1305,20 @@ class PdfEditActivity : AppCompatActivity() {
     }
 
     private fun updateSelectionControls() {
+        val hasSelection = !selectionOnlyMode && binding.editOverlay.hasSelection()
         val canResizeSelection = !selectionOnlyMode && binding.editOverlay.hasSelectedResizableOperation()
         val hasTextSelection = !selectionOnlyMode && binding.editOverlay.hasSelectedTextOperation()
-        binding.editSelectedCard.isVisible = false
-        binding.editUndoRow.isVisible = false
+
+        binding.editSelectedCard.isVisible = hasSelection
+        binding.editUndoRow.isVisible = hasSelection
+
+        binding.selectedSmallerButton.isVisible = canResizeSelection
         binding.selectedSmallerButton.isEnabled = canResizeSelection
+        binding.selectedLargerButton.isVisible = canResizeSelection
         binding.selectedLargerButton.isEnabled = canResizeSelection
+        binding.toggleBoldButton.isVisible = hasTextSelection
         binding.toggleBoldButton.isEnabled = hasTextSelection
+        binding.selectedDeleteButton.isEnabled = hasSelection
     }
 
     private fun currentMarkupState(): PageMarkupState {
@@ -1288,6 +1347,25 @@ class PdfEditActivity : AppCompatActivity() {
             hasUnsavedDraftChanges = true
         }
         updatePageUi()
+    }
+
+    private fun showDeletePageConfirmSheet(pagePosition: Int, onConfirmed: () -> Unit) {
+        val sheetBinding = SheetDeletePageConfirmBinding.inflate(layoutInflater)
+        val dialog = BottomSheetDialog(this)
+        
+        sheetBinding.confirmTitle.text = "Delete Page ${pagePosition + 1}?"
+        
+        sheetBinding.confirmCancelButton.setOnClickListener {
+            dialog.dismiss()
+        }
+        
+        sheetBinding.confirmDeleteButton.setOnClickListener {
+            dialog.dismiss()
+            onConfirmed()
+        }
+        
+        dialog.setContentView(sheetBinding.root)
+        dialog.show()
     }
 
     private fun applyPageSelection() {
@@ -1418,11 +1496,13 @@ class PdfEditActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val localPdf = LocalPdfStore.prepareForRead(this@PdfEditActivity, importPdfUri, importPdfName)
-                    ParcelFileDescriptor.open(localPdf.file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                        PdfRenderer(descriptor).use { renderer ->
-                            renderer.pageCount
-                        }
+                    val importDescriptor = LocalPdfStore.openSourceDescriptor(this@PdfEditActivity, importPdfUri)
+                        ?: throw IOException(getString(R.string.cannot_open_pdf))
+                    val importRenderer = PdfiumPageRenderer.open(importDescriptor)
+                    try {
+                        importRenderer.pageCount
+                    } finally {
+                        importRenderer.close()
                     }
                 }
             }
@@ -1539,23 +1619,23 @@ class PdfEditActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val localPdf = LocalPdfStore.prepareForRead(this@PdfEditActivity, importPdfUri, importPdfName)
-                    ParcelFileDescriptor.open(localPdf.file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                        PdfRenderer(descriptor).use { importRenderer ->
-                            pageNumbers.map { pageNumber ->
-                                importRenderer.openPage(pageNumber - 1).use { importPage ->
-                                    val bitmap = renderExportBitmap(importPage)
-                                    try {
-                                        InsertedPageState(
-                                            bytes = compressBitmapToJpeg(bitmap, EXPORT_JPEG_QUALITY),
-                                            sourceName = "$importPdfName · ${pageNumber}"
-                                        )
-                                    } finally {
-                                        bitmap.recycle()
-                                    }
-                                }
+                    val importDescriptor = LocalPdfStore.openSourceDescriptor(this@PdfEditActivity, importPdfUri)
+                        ?: throw IOException(getString(R.string.cannot_open_pdf))
+                    val importRenderer = PdfiumPageRenderer.open(importDescriptor)
+                    try {
+                        pageNumbers.map { pageNumber ->
+                            val bitmap = renderExportBitmap(importRenderer, pageNumber - 1)
+                            try {
+                                InsertedPageState(
+                                    bytes = compressBitmapToJpeg(bitmap, EXPORT_JPEG_QUALITY),
+                                    sourceName = "$importPdfName · ${pageNumber}"
+                                )
+                            } finally {
+                                bitmap.recycle()
                             }
                         }
+                    } finally {
+                        importRenderer.close()
                     }
                 }
             }
@@ -2068,58 +2148,147 @@ class PdfEditActivity : AppCompatActivity() {
         }
 
         reorderPagesDialog?.dismiss()
-        val sheetBinding = SheetReorderPagesBinding.inflate(layoutInflater)
+        val sheetBinding = SheetViewerPagesGridBinding.inflate(layoutInflater)
         val dialog = BottomSheetDialog(this)
         reorderPagesDialog = dialog
-        dialog.setContentView(sheetBinding.root)
 
-        val adapter = ReorderPagesAdapter()
-        sheetBinding.reorderPagesRecyclerView.layoutManager = LinearLayoutManager(this)
-        sheetBinding.reorderPagesRecyclerView.adapter = adapter
-        adapter.submitEntries(displayPages)
-        sheetBinding.reorderPagesQuickMoveButton.setOnClickListener {
-            showMovePageByNumberDialog {
-                adapter.submitEntries(displayPages)
-                adapter.notifyDataSetChanged()
-                sheetBinding.reorderPagesRecyclerView.scrollToPosition(currentPageIndex)
-            }
+        sheetBinding.gridTitle.text = pdfName
+
+        val historyStack = mutableListOf<List<EditorPageEntry>>()
+        val redoStack = mutableListOf<List<EditorPageEntry>>()
+
+        lateinit var adapter: PdfEditGridAdapter
+
+        fun updateUndoRedoUi() {
+            sheetBinding.gridSubtitle.text = getString(R.string.viewer_jump_pages_badge, adapter.itemCount)
+            val hasChanges = adapter.getEntries() != displayPages
+            sheetBinding.gridEditButton.isEnabled = hasChanges
+            sheetBinding.gridUndoButton.isEnabled = historyStack.isNotEmpty()
+            sheetBinding.gridRedoButton.isEnabled = redoStack.isNotEmpty()
+            sheetBinding.gridUndoButton.alpha = if (historyStack.isNotEmpty()) 1.0f else 0.35f
+            sheetBinding.gridRedoButton.alpha = if (redoStack.isNotEmpty()) 1.0f else 0.35f
         }
 
-        val touchHelper = ItemTouchHelper(
-            object : ItemTouchHelper.SimpleCallback(
-                ItemTouchHelper.UP or ItemTouchHelper.DOWN,
-                0
-            ) {
-                override fun onMove(
-                    recyclerView: RecyclerView,
-                    viewHolder: RecyclerView.ViewHolder,
-                    target: RecyclerView.ViewHolder
-                ): Boolean {
-                    val fromPosition = viewHolder.bindingAdapterPosition
-                    val toPosition = target.bindingAdapterPosition
-                    if (
-                        fromPosition == RecyclerView.NO_POSITION ||
-                        toPosition == RecyclerView.NO_POSITION
-                    ) {
-                        return false
-                    }
-                    moveDisplayPage(fromPosition, toPosition)
-                    adapter.submitEntries(displayPages)
-                    adapter.notifyItemMoved(fromPosition, toPosition)
-                    return true
+        adapter = PdfEditGridAdapter(
+            scope = lifecycleScope,
+            renderThumbnail = ::renderThumbnailBitmap,
+            cachedThumbnailBitmap = { entry ->
+                thumbnailCache.get(getPageCacheKey(entry))?.takeIf { !it.isRecycled }
+            },
+            onPageTapped = { position, entry ->
+                val hasChanges = adapter.getEntries() != displayPages
+                if (hasChanges) {
+                    savePagesFromGrid(dialog, adapter, position)
+                } else {
+                    showPage(position)
+                    dialog.dismiss()
                 }
-
-                override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) = Unit
-
-                override fun isLongPressDragEnabled(): Boolean = true
+            },
+            onDeleteTapped = { position ->
+                if (adapter.itemCount <= 1) {
+                    Toast.makeText(this, "Document must have at least one page.", Toast.LENGTH_SHORT).show()
+                } else {
+                    showDeletePageConfirmSheet(position) {
+                        historyStack.add(adapter.getEntries().toList())
+                        redoStack.clear()
+                        adapter.removeItem(position)
+                    }
+                }
+            },
+            onPagesChanged = {
+                updateUndoRedoUi()
             }
         )
-        touchHelper.attachToRecyclerView(sheetBinding.reorderPagesRecyclerView)
 
-        sheetBinding.reorderPagesDoneButton.setOnClickListener {
+        sheetBinding.pagesGridRecyclerView.layoutManager = GridLayoutManager(this, 3)
+        sheetBinding.pagesGridRecyclerView.adapter = adapter
+        adapter.submitEntries(displayPages, currentPageIndex)
+
+        sheetBinding.pagesGridRecyclerView.scrollToPosition(currentPageIndex)
+
+        sheetBinding.gridCloseButton.setOnClickListener {
             dialog.dismiss()
-            showPage(currentPageIndex)
         }
+
+        sheetBinding.gridEditButton.isEnabled = false
+        sheetBinding.gridEditButton.setOnClickListener {
+            val hasChanges = adapter.getEntries() != displayPages
+            if (hasChanges) {
+                savePagesFromGrid(dialog, adapter, null)
+            } else {
+                dialog.dismiss()
+            }
+        }
+
+        sheetBinding.gridUndoButton.setOnClickListener {
+            if (historyStack.isNotEmpty()) {
+                val lastState = historyStack.removeAt(historyStack.lastIndex)
+                redoStack.add(adapter.getEntries().toList())
+                adapter.submitEntries(lastState, currentPageIndex)
+                updateUndoRedoUi()
+            }
+        }
+
+        sheetBinding.gridRedoButton.setOnClickListener {
+            if (redoStack.isNotEmpty()) {
+                val nextState = redoStack.removeAt(redoStack.lastIndex)
+                historyStack.add(adapter.getEntries().toList())
+                adapter.submitEntries(nextState, currentPageIndex)
+                updateUndoRedoUi()
+            }
+        }
+
+        val itemTouchHelperCallback = object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN or ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT,
+            0
+        ) {
+            private var dragStartIndexList: List<EditorPageEntry>? = null
+
+            override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
+                super.onSelectedChanged(viewHolder, actionState)
+                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) {
+                    dragStartIndexList = adapter.getEntries().toList()
+                }
+            }
+
+            override fun onMove(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                val fromPos = viewHolder.bindingAdapterPosition
+                val toPos = target.bindingAdapterPosition
+                if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) return false
+                adapter.moveItem(fromPos, toPos)
+                return true
+            }
+
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+                // Not used
+            }
+
+            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+                super.clearView(recyclerView, viewHolder)
+                adapter.notifyDataSetChanged()
+                val startList = dragStartIndexList
+                if (startList != null) {
+                    val currentList = adapter.getEntries().toList()
+                    if (startList != currentList) {
+                        historyStack.add(startList)
+                        redoStack.clear()
+                        updateUndoRedoUi()
+                    }
+                    dragStartIndexList = null
+                }
+            }
+        }
+
+        val itemTouchHelper = ItemTouchHelper(itemTouchHelperCallback)
+        itemTouchHelper.attachToRecyclerView(sheetBinding.pagesGridRecyclerView)
+
+        updateUndoRedoUi()
+
+        dialog.setContentView(sheetBinding.root)
         dialog.setOnShowListener {
             val bottomSheet =
                 dialog.findViewById<android.widget.FrameLayout>(com.google.android.material.R.id.design_bottom_sheet)
@@ -2139,68 +2308,53 @@ class PdfEditActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun showMovePageByNumberDialog(onMoved: () -> Unit) {
-        if (selectionOnlyMode || pageCount <= 1) {
-            return
-        }
+    private fun savePagesFromGrid(
+        dialog: BottomSheetDialog,
+        adapter: PdfEditGridAdapter,
+        targetPositionAfterSave: Int?
+    ) {
+        val oldEntries = displayPages.toList()
+        val oldPageMarkups = pageMarkups.toMap()
+        val newEntries = adapter.getEntries().toList()
 
-        val dialogBinding = DialogReorderPageBinding.inflate(layoutInflater)
-        val defaultSource = (currentPageIndex + 1).coerceIn(1, pageCount)
-        dialogBinding.movePageSourceInput.setText(defaultSource.toString())
-        dialogBinding.movePageSourceInput.setSelection(dialogBinding.movePageSourceInput.text?.length ?: 0)
-        dialogBinding.movePageTargetInput.setText(defaultSource.toString())
-        dialogBinding.movePageTargetInput.setSelection(dialogBinding.movePageTargetInput.text?.length ?: 0)
-        dialogBinding.movePageTopButton.setOnClickListener {
-            dialogBinding.movePageTargetInput.setText("1")
-            dialogBinding.movePageTargetInput.setSelection(dialogBinding.movePageTargetInput.text?.length ?: 0)
-        }
-        dialogBinding.movePageHereButton.setOnClickListener {
-            dialogBinding.movePageTargetInput.setText(defaultSource.toString())
-            dialogBinding.movePageTargetInput.setSelection(dialogBinding.movePageTargetInput.text?.length ?: 0)
-        }
-        dialogBinding.movePageEndButton.setOnClickListener {
-            dialogBinding.movePageTargetInput.setText(pageCount.toString())
-            dialogBinding.movePageTargetInput.setSelection(dialogBinding.movePageTargetInput.text?.length ?: 0)
-        }
+        displayPages.clear()
+        displayPages.addAll(newEntries)
 
-        val dialog = MaterialAlertDialogBuilder(this)
-            .setView(dialogBinding.root)
-            .create()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-
-        dialogBinding.movePageCancelButton.setOnClickListener {
-            dialog.dismiss()
+        val newPageMarkups = mutableMapOf<Int, PageMarkupState>()
+        newEntries.forEachIndexed { newIndex, entry ->
+            val oldIndex = oldEntries.indexOf(entry)
+            if (oldIndex != -1) {
+                val markup = oldPageMarkups[oldIndex]
+                if (markup != null) {
+                    newPageMarkups[newIndex] = markup
+                }
+            }
         }
-        dialogBinding.movePageConfirmButton.setOnClickListener {
-            val sourcePage = dialogBinding.movePageSourceInput.text?.toString()?.trim()?.toIntOrNull()
-            val targetPage = dialogBinding.movePageTargetInput.text?.toString()?.trim()?.toIntOrNull()
-            var hasError = false
-            if (sourcePage == null || sourcePage !in 1..pageCount) {
-                dialogBinding.movePageSourceInputLayout.error =
-                    getString(R.string.visual_edit_reorder_error, pageCount)
-                hasError = true
+        pageMarkups.clear()
+        pageMarkups.putAll(newPageMarkups)
+
+        syncInsertedPagePositionsFromDisplayOrder()
+        deletedPages.clear()
+        refreshPageCountState()
+        hasUnsavedDraftChanges = true
+        pageBitmapCache.evictAll()
+
+        val newPageIndex = if (targetPositionAfterSave != null) {
+            targetPositionAfterSave.coerceIn(0, pageCount - 1)
+        } else {
+            val oldPageEntry = oldEntries.getOrNull(currentPageIndex)
+            val indexInNew = newEntries.indexOf(oldPageEntry)
+            if (indexInNew != -1) {
+                indexInNew
             } else {
-                dialogBinding.movePageSourceInputLayout.error = null
+                currentPageIndex.coerceIn(0, pageCount - 1)
             }
-            if (targetPage == null || targetPage !in 1..pageCount) {
-                dialogBinding.movePageTargetInputLayout.error =
-                    getString(R.string.visual_edit_reorder_error, pageCount)
-                hasError = true
-            } else {
-                dialogBinding.movePageTargetInputLayout.error = null
-            }
-            if (hasError) {
-                return@setOnClickListener
-            }
+        }
 
-            moveDisplayPage(sourcePage!! - 1, targetPage!! - 1)
-            onMoved()
-            dialog.dismiss()
-        }
-        dialog.setOnShowListener {
-            dialogBinding.movePageSourceInput.requestFocus()
-        }
-        dialog.show()
+        currentPageIndex = newPageIndex
+        dialog.dismiss()
+        showPage(currentPageIndex)
+        showMessage("Changes saved successfully")
     }
 
     private fun showMoreToolsSheet() {
@@ -2453,14 +2607,14 @@ class PdfEditActivity : AppCompatActivity() {
     }
 
     @Throws(IOException::class)
-    private fun exportVisualEdits(inputUri: Uri, outputUri: Uri) {
+    private suspend fun exportVisualEdits(inputUri: Uri, outputUri: Uri) {
         contentResolver.openOutputStream(outputUri)?.use { outputStream ->
             writeVisualEditsToStream(inputUri, outputStream)
         } ?: throw IOException(getString(R.string.cannot_write_pdf))
     }
 
     @Throws(IOException::class)
-    private fun exportVisualEditsToFile(inputUri: Uri, outputFile: File) {
+    private suspend fun exportVisualEditsToFile(inputUri: Uri, outputFile: File) {
         outputFile.parentFile?.mkdirs()
         FileOutputStream(outputFile).use { outputStream ->
             writeVisualEditsToStream(inputUri, outputStream)
@@ -2468,98 +2622,104 @@ class PdfEditActivity : AppCompatActivity() {
     }
 
     @Throws(IOException::class)
-    private fun writeVisualEditsToStream(inputUri: Uri, outputStream: OutputStream) {
-        val localPdf = LocalPdfStore.prepareForRead(this, inputUri, pdfName)
-        ParcelFileDescriptor.open(localPdf.file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            PdfRenderer(descriptor).use { exportRenderer ->
-                val exportPageIndexes = (0 until pageCount)
-                    .filterNot { it in deletedPages }
-                if (exportPageIndexes.isEmpty()) {
-                    throw IOException(getString(R.string.visual_edit_no_pages_left))
-                }
-                PDDocument().use { document ->
-                    exportPageIndexes.forEachIndexed { exportedIndex, pageIndex ->
-                        val originalPageIndex = originalPageIndexAt(pageIndex)
-                        if (originalPageIndex != null) {
-                            exportRenderer.openPage(originalPageIndex).use { page ->
-                                val bitmap = renderExportBitmap(page)
-                                try {
-                                    pageMarkups[pageIndex]?.let { markupState ->
-                                        if (!markupState.isEmpty()) {
-                                            val canvas = Canvas(bitmap)
-                                            PdfMarkupOverlayView.drawMarkupOperations(
-                                                canvas = canvas,
-                                                operations = markupState.operations,
-                                                targetWidth = bitmap.width.toFloat(),
-                                                targetHeight = bitmap.height.toFloat()
-                                            )
-                                        }
-                                    }
-                                    if (binding.pageNumbersChip.isChecked) {
-                                        drawPageNumber(
-                                            canvas = Canvas(bitmap),
-                                            pageNumber = exportedIndex + 1,
-                                            totalPages = exportPageIndexes.size,
-                                            width = bitmap.width.toFloat(),
-                                            height = bitmap.height.toFloat()
-                                        )
-                                    }
-                                    appendBitmapPage(
-                                        document = document,
-                                        bitmap = bitmap,
-                                        pageWidth = page.width.toFloat(),
-                                        pageHeight = page.height.toFloat(),
-                                        markupState = pageMarkups[pageIndex]
+    private suspend fun writeVisualEditsToStream(inputUri: Uri, outputStream: OutputStream) {
+        // Zero-copy source open via Pdfium (no native PdfRenderer crash on huge
+        // files, no full-file copy).
+        val descriptor = LocalPdfStore.openSourceDescriptor(this, inputUri)
+            ?: throw IOException(getString(R.string.cannot_open_pdf))
+        val exportRenderer = PdfiumPageRenderer.open(descriptor)
+        try {
+            val exportPageIndexes = (0 until pageCount)
+                .filterNot { it in deletedPages }
+            if (exportPageIndexes.isEmpty()) {
+                throw IOException(getString(R.string.visual_edit_no_pages_left))
+            }
+            // setupTempFileOnly() makes PDFBox stream the document to a disk
+            // scratch file instead of holding every page in RAM, so exporting
+            // an 800 MB - 1 GB edited document no longer OOM-kills the process.
+            PDDocument(MemoryUsageSetting.setupTempFileOnly()).use { document ->
+                exportPageIndexes.forEachIndexed { exportedIndex, pageIndex ->
+                    val originalPageIndex = originalPageIndexAt(pageIndex)
+                    if (originalPageIndex != null) {
+                        val (pageWidthPts, pageHeightPts) = exportRenderer.pageSizePoints(originalPageIndex)
+                        val bitmap = renderExportBitmap(exportRenderer, originalPageIndex)
+                        try {
+                            pageMarkups[pageIndex]?.let { markupState ->
+                                if (!markupState.isEmpty()) {
+                                    val canvas = Canvas(bitmap)
+                                    PdfMarkupOverlayView.drawMarkupOperations(
+                                        canvas = canvas,
+                                        operations = markupState.operations,
+                                        targetWidth = bitmap.width.toFloat(),
+                                        targetHeight = bitmap.height.toFloat()
                                     )
-                                } finally {
-                                    bitmap.recycle()
                                 }
                             }
-                        } else {
-                            val insertedPage = insertedPageAt(pageIndex)
-                                ?: throw IOException(getString(R.string.visual_edit_add_pages_invalid))
-                            val bitmap = renderInsertedPageBitmap(
-                                insertedPage = insertedPage,
-                                maxDimension = EXPORT_RENDER_MAX_DIMENSION
-                            )
-                            try {
-                                pageMarkups[pageIndex]?.let { markupState ->
-                                    if (!markupState.isEmpty()) {
-                                        val canvas = Canvas(bitmap)
-                                        PdfMarkupOverlayView.drawMarkupOperations(
-                                            canvas = canvas,
-                                            operations = markupState.operations,
-                                            targetWidth = bitmap.width.toFloat(),
-                                            targetHeight = bitmap.height.toFloat()
-                                        )
-                                    }
-                                }
-                                if (binding.pageNumbersChip.isChecked) {
-                                    drawPageNumber(
-                                        canvas = Canvas(bitmap),
-                                        pageNumber = exportedIndex + 1,
-                                        totalPages = exportPageIndexes.size,
-                                        width = bitmap.width.toFloat(),
-                                        height = bitmap.height.toFloat()
-                                    )
-                                }
-                                appendBitmapPage(
-                                    document = document,
-                                    bitmap = bitmap,
-                                    pageWidth = bitmap.width.toFloat(),
-                                    pageHeight = bitmap.height.toFloat(),
-                                    markupState = pageMarkups[pageIndex]
+                            if (binding.pageNumbersChip.isChecked) {
+                                drawPageNumber(
+                                    canvas = Canvas(bitmap),
+                                    pageNumber = exportedIndex + 1,
+                                    totalPages = exportPageIndexes.size,
+                                    width = bitmap.width.toFloat(),
+                                    height = bitmap.height.toFloat()
                                 )
-                            } finally {
-                                bitmap.recycle()
                             }
+                            appendBitmapPage(
+                                document = document,
+                                bitmap = bitmap,
+                                pageWidth = pageWidthPts.toFloat(),
+                                pageHeight = pageHeightPts.toFloat(),
+                                markupState = pageMarkups[pageIndex]
+                            )
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    } else {
+                        val insertedPage = insertedPageAt(pageIndex)
+                            ?: throw IOException(getString(R.string.visual_edit_add_pages_invalid))
+                        val bitmap = renderInsertedPageBitmap(
+                            insertedPage = insertedPage,
+                            maxDimension = EXPORT_RENDER_MAX_DIMENSION
+                        )
+                        try {
+                            pageMarkups[pageIndex]?.let { markupState ->
+                                if (!markupState.isEmpty()) {
+                                    val canvas = Canvas(bitmap)
+                                    PdfMarkupOverlayView.drawMarkupOperations(
+                                        canvas = canvas,
+                                        operations = markupState.operations,
+                                        targetWidth = bitmap.width.toFloat(),
+                                        targetHeight = bitmap.height.toFloat()
+                                    )
+                                }
+                            }
+                            if (binding.pageNumbersChip.isChecked) {
+                                drawPageNumber(
+                                    canvas = Canvas(bitmap),
+                                    pageNumber = exportedIndex + 1,
+                                    totalPages = exportPageIndexes.size,
+                                    width = bitmap.width.toFloat(),
+                                    height = bitmap.height.toFloat()
+                                )
+                            }
+                            appendBitmapPage(
+                                document = document,
+                                bitmap = bitmap,
+                                pageWidth = bitmap.width.toFloat(),
+                                pageHeight = bitmap.height.toFloat(),
+                                markupState = pageMarkups[pageIndex]
+                            )
+                        } finally {
+                            bitmap.recycle()
                         }
                     }
-                    BufferedOutputStream(outputStream).use { bufferedStream ->
-                        document.save(bufferedStream)
-                    }
+                }
+                BufferedOutputStream(outputStream).use { bufferedStream ->
+                    document.save(bufferedStream)
                 }
             }
+        } finally {
+            exportRenderer.close()
         }
     }
 
@@ -2626,7 +2786,7 @@ class PdfEditActivity : AppCompatActivity() {
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = (
                 min(safePageWidth, safePageHeight) * operation.textSizeRatio
-                ).coerceIn(18f, 84f)
+                ).coerceIn(10f, 350f)
             typeface = if (operation.isBold) {
                 Typeface.DEFAULT_BOLD
             } else {
@@ -2661,19 +2821,26 @@ class PdfEditActivity : AppCompatActivity() {
         }
     }
 
-    private fun renderExportBitmap(page: PdfRenderer.Page): Bitmap {
-        val currentMax = max(page.width, page.height).toFloat().coerceAtLeast(1f)
-        val renderScale = (EXPORT_RENDER_MAX_DIMENSION / currentMax).coerceIn(1f, 2.2f)
-        val width = (page.width * renderScale).roundToInt().coerceAtLeast(1)
-        val height = (page.height * renderScale).roundToInt().coerceAtLeast(1)
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(Color.WHITE)
-        val matrix = Matrix().apply {
-            postScale(renderScale, renderScale)
+    private suspend fun renderExportBitmap(activeRenderer: PdfiumPageRenderer, pageIndex: Int): Bitmap {
+        var lastError: Throwable? = null
+        EXPORT_RENDER_FALLBACK_FACTORS.forEach { factor ->
+            try {
+                // Render at export quality, bounded by the max dimension and a
+                // per-bitmap pixel budget that shrinks on each retry so a single
+                // heavy page can't take down the whole export.
+                return activeRenderer.renderPage(
+                    pageIndex = pageIndex,
+                    targetWidth = EXPORT_RENDER_MAX_DIMENSION,
+                    maxDimension = EXPORT_RENDER_MAX_DIMENSION,
+                    maxPixels = (maxExportBitmapPixels * factor).toLong(),
+                )
+            } catch (error: OutOfMemoryError) {
+                lastError = error
+                pageBitmapCache.evictAll()
+                System.gc()
+            }
         }
-        page.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-        return bitmap
+        throw IOException("Failed to render page $pageIndex for export", lastError)
     }
 
     private fun compressBitmapToJpeg(bitmap: Bitmap, quality: Int): ByteArray {
@@ -2725,9 +2892,7 @@ class PdfEditActivity : AppCompatActivity() {
 
     private fun closeCurrentPdf() {
         runCatching { renderer?.close() }
-        runCatching { fileDescriptor?.close() }
         renderer = null
-        fileDescriptor = null
         pageBitmapCache.evictAll()
     }
 
@@ -2743,6 +2908,8 @@ class PdfEditActivity : AppCompatActivity() {
         binding.addTextButton.isEnabled = !isLoading && !selectionOnlyMode
         binding.addImageButton.isEnabled = !isLoading && !selectionOnlyMode
         binding.moreToolsButton.isEnabled = !isLoading && !selectionOnlyMode
+        binding.editReorderButton.isEnabled = !isLoading && !selectionOnlyMode
+        binding.editReorderButtonContainer.isVisible = !selectionOnlyMode
         binding.deletePageButton.isEnabled = !isLoading
         binding.selectedSmallerButton.isEnabled =
             !isLoading && !selectionOnlyMode && binding.editOverlay.hasSelectedResizableOperation()
@@ -2750,6 +2917,8 @@ class PdfEditActivity : AppCompatActivity() {
             !isLoading && !selectionOnlyMode && binding.editOverlay.hasSelectedResizableOperation()
         binding.toggleBoldButton.isEnabled =
             !isLoading && !selectionOnlyMode && binding.editOverlay.hasSelectedTextOperation()
+        binding.selectedDeleteButton.isEnabled =
+            !isLoading && !selectionOnlyMode && binding.editOverlay.hasSelection()
         binding.undoEditButton.isEnabled =
             !isLoading && !selectionOnlyMode && currentMarkupState().operations.isNotEmpty()
         binding.clearPageButton.isEnabled =
@@ -2875,8 +3044,162 @@ class PdfEditActivity : AppCompatActivity() {
         }
     }
 
+    private class PdfEditGridAdapter(
+        private val scope: kotlinx.coroutines.CoroutineScope,
+        private val renderThumbnail: suspend (entry: EditorPageEntry) -> Bitmap,
+        private val cachedThumbnailBitmap: (entry: EditorPageEntry) -> Bitmap?,
+        private val onPageTapped: (position: Int, entry: EditorPageEntry) -> Unit,
+        private val onDeleteTapped: (position: Int) -> Unit,
+        private val onPagesChanged: () -> Unit
+    ) : RecyclerView.Adapter<PdfEditGridAdapter.GridViewHolder>() {
+
+        private val entries = mutableListOf<EditorPageEntry>()
+        private var selectedIndex: Int = -1
+
+        init {
+            setHasStableIds(true)
+        }
+
+        fun submitEntries(newEntries: List<EditorPageEntry>, activeIndex: Int) {
+            entries.clear()
+            entries.addAll(newEntries)
+            selectedIndex = activeIndex
+            notifyDataSetChanged()
+        }
+
+        fun getEntries(): List<EditorPageEntry> = entries
+
+        fun moveItem(fromPosition: Int, toPosition: Int) {
+            if (fromPosition !in entries.indices || toPosition !in entries.indices) return
+            if (fromPosition < toPosition) {
+                for (i in fromPosition until toPosition) {
+                    java.util.Collections.swap(entries, i, i + 1)
+                }
+            } else {
+                for (i in fromPosition downTo toPosition + 1) {
+                    java.util.Collections.swap(entries, i, i - 1)
+                }
+            }
+            notifyItemMoved(fromPosition, toPosition)
+            onPagesChanged()
+        }
+
+        fun removeItem(position: Int) {
+            if (position in entries.indices) {
+                entries.removeAt(position)
+                notifyItemRemoved(position)
+                notifyItemRangeChanged(position, entries.size - position)
+                onPagesChanged()
+            }
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): GridViewHolder {
+            val binding = ItemPdfGridPageBinding.inflate(
+                android.view.LayoutInflater.from(parent.context),
+                parent,
+                false
+            )
+            return GridViewHolder(binding)
+        }
+
+        override fun onBindViewHolder(holder: GridViewHolder, position: Int) {
+            holder.bind(entries[position], position, position == selectedIndex)
+        }
+
+        override fun onViewRecycled(holder: GridViewHolder) {
+            holder.recycle()
+            super.onViewRecycled(holder)
+        }
+
+        override fun getItemCount(): Int = entries.size
+
+        override fun getItemId(position: Int): Long {
+            val entry = entries[position]
+            return when (entry) {
+                is EditorPageEntry.Original -> entry.originalIndex.toLong()
+                is EditorPageEntry.Inserted -> (entry.page.id.hashCode() and 0xfffffff).toLong() + 1000000L
+            }
+        }
+
+        inner class GridViewHolder(
+            private val binding: ItemPdfGridPageBinding
+        ) : RecyclerView.ViewHolder(binding.root) {
+
+            private var renderJob: Job? = null
+            private var boundEntry: EditorPageEntry? = null
+
+            fun bind(entry: EditorPageEntry, displayPosition: Int, isSelected: Boolean) {
+                boundEntry = entry
+                renderJob?.cancel()
+                binding.gridPageNumber.text = (displayPosition + 1).toString()
+                val context = binding.root.context
+                binding.gridPageCard.strokeColor =
+                    context.getColor(
+                        if (isSelected) R.color.thumbnail_selected else R.color.thumbnail_unselected
+                    )
+                binding.gridPageCard.strokeWidth = if (isSelected) 3 else 1
+                binding.gridPageCard.setCardBackgroundColor(
+                    context.getColor(
+                        if (isSelected) R.color.button_secondary_bg else R.color.card_surface_strong
+                    )
+                )
+                binding.gridPageNumber.alpha = if (isSelected) 1f else 0.82f
+                binding.root.alpha = if (isSelected) 1f else 0.92f
+                
+                binding.root.setOnClickListener {
+                    val pos = bindingAdapterPosition
+                    if (pos != RecyclerView.NO_POSITION) {
+                        onPageTapped(pos, entry)
+                    }
+                }
+
+                binding.gridPageDeleteButton.setOnClickListener {
+                    val pos = bindingAdapterPosition
+                    if (pos != RecyclerView.NO_POSITION) {
+                        onDeleteTapped(pos)
+                    }
+                }
+
+                val cachedBitmap = cachedThumbnailBitmap(entry)
+                if (cachedBitmap != null) {
+                    binding.gridPageImage.setImageBitmap(cachedBitmap)
+                    binding.gridPageLoading.isVisible = false
+                    return
+                }
+
+                binding.gridPageImage.setImageDrawable(null)
+                binding.gridPageLoading.isVisible = true
+                renderJob = scope.launch {
+                    runCatching { renderThumbnail(entry) }
+                        .onSuccess { bitmap ->
+                            if (boundEntry == entry) {
+                                binding.gridPageImage.setImageBitmap(bitmap)
+                                binding.gridPageLoading.isVisible = false
+                            }
+                        }
+                        .onFailure {
+                            if (boundEntry == entry) {
+                                binding.gridPageLoading.isVisible = false
+                            }
+                        }
+                }
+            }
+
+            fun recycle() {
+                renderJob?.cancel()
+                renderJob = null
+                boundEntry = null
+                binding.gridPageImage.setImageDrawable(null)
+                binding.gridPageLoading.isVisible = false
+                binding.root.setOnClickListener(null)
+                binding.gridPageDeleteButton.setOnClickListener(null)
+            }
+        }
+    }
+
     companion object {
         const val EXTRA_RESULT_REMOVED_PAGES = "extra_result_removed_pages"
+        const val EXTRA_START_REORDER = "extra_start_reorder"
         private const val EXTRA_PDF_URI = "extra_pdf_uri"
         private const val EXTRA_PDF_NAME = "extra_pdf_name"
         private const val EXTRA_SELECTION_ONLY = "extra_selection_only"
@@ -2884,6 +3207,8 @@ class PdfEditActivity : AppCompatActivity() {
         private const val PAGE_RENDER_MAX_DIMENSION = 2200f
         private const val EXPORT_RENDER_MAX_DIMENSION = 1800f
         private const val EXPORT_JPEG_QUALITY = 90
+        private const val MIN_EXPORT_RENDER_SCALE = 0.2f
+        private val EXPORT_RENDER_FALLBACK_FACTORS = floatArrayOf(1f, 0.7f, 0.5f, 0.35f)
         private const val PREVIEW_DIRECTORY = "visual_edit_previews"
         private const val EDITOR_PAGE_CACHE_SIZE_KB = 14 * 1024
         private const val EDITOR_RENDER_QUALITY_MULTIPLIER = 1.35f
@@ -2899,8 +3224,20 @@ class PdfEditActivity : AppCompatActivity() {
             pdfName: String
         ): Intent {
             return Intent(context, PdfEditActivity::class.java).apply {
+                data = pdfUri
                 putExtra(EXTRA_PDF_URI, pdfUri.toString())
                 putExtra(EXTRA_PDF_NAME, pdfName)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+        }
+
+        fun createReorderIntent(
+            context: android.content.Context,
+            pdfUri: Uri,
+            pdfName: String
+        ): Intent {
+            return createIntent(context, pdfUri, pdfName).apply {
+                putExtra(EXTRA_START_REORDER, true)
             }
         }
 

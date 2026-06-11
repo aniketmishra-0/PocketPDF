@@ -11,10 +11,8 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
-import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import android.text.format.Formatter
 import android.util.LruCache
 import android.view.KeyEvent
@@ -35,8 +33,13 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.ItemTouchHelper
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import java.io.FileOutputStream
+import java.io.BufferedOutputStream
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -45,7 +48,12 @@ import com.renameapk.pdfzip.databinding.ActivityPdfViewerBinding
 import com.renameapk.pdfzip.databinding.DialogJumpToPageBinding
 import com.renameapk.pdfzip.databinding.ItemPdfPageBinding
 import com.renameapk.pdfzip.databinding.ItemPdfThumbnailBinding
+import com.renameapk.pdfzip.databinding.ItemPdfGridPageBinding
+import com.renameapk.pdfzip.databinding.SheetViewerPagesGridBinding
+import com.renameapk.pdfzip.databinding.SheetDeletePageConfirmBinding
 import com.renameapk.pdfzip.databinding.SheetReaderToolsBinding
+import com.renameapk.pdfzip.databinding.SheetReaderSettingsBinding
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -58,31 +66,37 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private const val PAGE_PLACEHOLDER_ASPECT_RATIO = 1.26f
 private const val PAGE_PLACEHOLDER_MIN_HEIGHT_DP = 320f
 private const val PAGE_PLACEHOLDER_MAX_HEIGHT_RATIO = 0.82f
 private const val PAGE_ACTIVE_RENDER_BUFFER = 1
-private const val PAGE_PREFETCH_BUFFER = 2
+private const val PAGE_PREFETCH_BUFFER = 1
 private const val THUMBNAIL_PREFETCH_BUFFER = 3
 
 class PdfViewerActivity : AppCompatActivity() {
 
-    private data class OpenedPdf(
-        val fileDescriptor: ParcelFileDescriptor,
-        val renderer: PdfRenderer
-    )
-
     private lateinit var binding: ActivityPdfViewerBinding
     private lateinit var pageAdapter: PdfPageAdapter
     private lateinit var thumbnailAdapter: PdfThumbnailAdapter
-    private lateinit var bookmarkAdapter: BookmarkPageAdapter
 
     private val renderMutex = Mutex()
-    private val pageCache = object : LruCache<Int, Bitmap>(DEFAULT_CACHE_SIZE_KB) {
+    private val pageCacheSizeKb = (Runtime.getRuntime().maxMemory() / 1024 / 4)
+        .coerceIn(DEFAULT_CACHE_SIZE_KB.toLong(), 192L * 1024L)
+        .toInt()
+    private val thumbnailCacheSizeKb = (Runtime.getRuntime().maxMemory() / 1024 / 24)
+        .coerceIn(THUMBNAIL_CACHE_SIZE_KB.toLong(), 24L * 1024L)
+        .toInt()
+    // Hard cap on the pixel count of a single rendered page bitmap so a large
+    // or high-resolution page in a heavy PDF can never allocate enough memory
+    // to OOM-kill the process. Scales with the available heap.
+    private val maxPageBitmapPixels = (Runtime.getRuntime().maxMemory() / 8 / 4)
+        .coerceIn(2_000_000L, 8_000_000L)
+    private val pageCache = object : LruCache<Int, Bitmap>(pageCacheSizeKb) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.allocationByteCount / 1024
     }
-    private val thumbnailCache = object : LruCache<Int, Bitmap>(THUMBNAIL_CACHE_SIZE_KB) {
+    private val thumbnailCache = object : LruCache<Int, Bitmap>(thumbnailCacheSizeKb) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.allocationByteCount / 1024
     }
 
@@ -90,8 +104,7 @@ class PdfViewerActivity : AppCompatActivity() {
     private var projectLookupUri: Uri? = null
     private var pdfName: String = ""
     private var pdfSizeBytes: Long? = null
-    private var fileDescriptor: ParcelFileDescriptor? = null
-    private var renderer: PdfRenderer? = null
+    private var renderer: PdfiumPageRenderer? = null
     private var pageCount: Int = 0
     private var projectLinkMap: Map<Int, List<MarkupOperation.Link>> = emptyMap()
     private var isSeekBarTracking = false
@@ -109,6 +122,7 @@ class PdfViewerActivity : AppCompatActivity() {
     private var currentPageIndex = 0
     private var readerQuickActionsDialog: BottomSheetDialog? = null
     private var jumpToPageDialog: AlertDialog? = null
+    private var pagesGridDialog: BottomSheetDialog? = null
     private var pendingPageImageExportIndex: Int? = null
     private var documentZoomScale = 1f
     private var currentReaderFitMode = ReaderLibraryStore.ReaderFitMode.FIT_PAGE
@@ -169,15 +183,7 @@ class PdfViewerActivity : AppCompatActivity() {
         }
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) {
-                handleViewerBackPressed()
-            }
-            return true
-        }
-        return super.dispatchKeyEvent(event)
-    }
+
 
     override fun onStop() {
         if (::binding.isInitialized) {
@@ -185,6 +191,20 @@ class PdfViewerActivity : AppCompatActivity() {
                 .show(WindowInsetsCompat.Type.systemBars())
         }
         super.onStop()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // Shed bitmap caches under memory pressure so the system reclaims
+        // memory from us instead of killing the process. Cached bitmaps that
+        // are still attached to a visible ImageView are not recycled here, so
+        // this is safe to call at any time.
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            thumbnailCache.evictAll()
+        }
+        if (level >= TRIM_MEMORY_RUNNING_CRITICAL) {
+            pageCache.evictAll()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -225,6 +245,371 @@ class PdfViewerActivity : AppCompatActivity() {
     private fun setupToolbar() {
         binding.viewerToolbar.title = pdfName
         binding.viewerToolbar.setNavigationOnClickListener { handleViewerBackPressed() }
+        
+        binding.viewerToolbar.inflateMenu(R.menu.viewer_menu)
+        binding.viewerToolbar.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                R.id.action_bookmark -> {
+                    val currentUri = pdfUri
+                    if (currentUri != null && pageCount > 0) {
+                        val bookmarks = ReaderLibraryStore.toggleBookmark(this, currentUri, currentPageIndex)
+                        val isBookmarked = currentPageIndex in bookmarks
+                        item.setIcon(if (isBookmarked) R.drawable.ic_star_20 else R.drawable.ic_star_outline_20)
+                        val msg = if (isBookmarked) {
+                            getString(R.string.viewer_add_bookmark)
+                        } else {
+                            getString(R.string.viewer_remove_bookmark)
+                        }
+                        showMessage(msg)
+                    }
+                    true
+                }
+                R.id.action_search -> {
+                    showJumpToPageDialog()
+                    true
+                }
+                R.id.action_grid -> {
+                    showPagesGridDialog()
+                    true
+                }
+                R.id.action_share -> {
+                    shareCurrentDocument()
+                    true
+                }
+                R.id.action_more -> {
+                    showSettingsDialog()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun toggleThumbnailStrip() {
+        isThumbnailStripExpanded = !isThumbnailStripExpanded
+        updateThumbnailStripVisibility()
+        if (isThumbnailStripExpanded && pageCount > 0) {
+            updateThumbnailStripUi(currentPageIndex, smoothScroll = false)
+        }
+    }
+
+    private fun showPagesGridDialog() {
+        if (pageCount <= 0) {
+            return
+        }
+        pagesGridDialog?.dismiss()
+        val sheetBinding = SheetViewerPagesGridBinding.inflate(layoutInflater)
+        val dialog = BottomSheetDialog(this)
+        pagesGridDialog = dialog
+
+        sheetBinding.gridTitle.text = pdfName
+
+        val historyStack = mutableListOf<List<Int>>()
+        val redoStack = mutableListOf<List<Int>>()
+
+        lateinit var adapter: PdfGridAdapter
+
+        fun updateUndoRedoUi() {
+            sheetBinding.gridSubtitle.text = getString(R.string.viewer_jump_pages_badge, adapter.itemCount)
+            val hasChanges = adapter.getPages() != (0 until pageCount).toList()
+            sheetBinding.gridEditButton.isEnabled = hasChanges
+            sheetBinding.gridUndoButton.isEnabled = historyStack.isNotEmpty()
+            sheetBinding.gridRedoButton.isEnabled = redoStack.isNotEmpty()
+            sheetBinding.gridUndoButton.alpha = if (historyStack.isNotEmpty()) 1.0f else 0.35f
+            sheetBinding.gridRedoButton.alpha = if (redoStack.isNotEmpty()) 1.0f else 0.35f
+        }
+
+        adapter = PdfGridAdapter(
+            scope = lifecycleScope,
+            renderThumbnail = ::renderThumbnailBitmap,
+            cachedThumbnailBitmap = { pageIndex ->
+                thumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }
+            },
+            onPageTapped = { position, pageIndex ->
+                val hasChanges = adapter.getPages() != (0 until pageCount).toList()
+                if (hasChanges) {
+                    savePagesDirectly(dialog, sheetBinding, adapter, position)
+                } else {
+                    scrollToPage(pageIndex, smooth = false)
+                    dialog.dismiss()
+                }
+            },
+            onDeleteTapped = { position ->
+                if (adapter.itemCount <= 1) {
+                    Toast.makeText(this@PdfViewerActivity, "PDF must have at least one page.", Toast.LENGTH_SHORT).show()
+                } else {
+                    showDeletePageConfirmSheet(position) {
+                        historyStack.add(adapter.getPages().toList())
+                        redoStack.clear()
+                        adapter.removeItem(position)
+                    }
+                }
+            },
+            onPagesChanged = {
+                updateUndoRedoUi()
+            }
+        )
+
+        sheetBinding.pagesGridRecyclerView.layoutManager = GridLayoutManager(this, 3)
+        sheetBinding.pagesGridRecyclerView.adapter = adapter
+        adapter.submitPages((0 until pageCount).toList(), currentPageIndex)
+
+        sheetBinding.pagesGridRecyclerView.scrollToPosition(currentPageIndex)
+
+        sheetBinding.gridCloseButton.setOnClickListener {
+            dialog.dismiss()
+        }
+        
+        sheetBinding.gridEditButton.isEnabled = false
+        sheetBinding.gridEditButton.setOnClickListener {
+            val hasChanges = adapter.getPages() != (0 until pageCount).toList()
+            if (hasChanges) {
+                savePagesDirectly(dialog, sheetBinding, adapter, null)
+            } else {
+                dialog.dismiss()
+            }
+        }
+
+        sheetBinding.gridUndoButton.setOnClickListener {
+            if (historyStack.isNotEmpty()) {
+                val lastState = historyStack.removeAt(historyStack.lastIndex)
+                redoStack.add(adapter.getPages().toList())
+                adapter.submitPages(lastState, currentPageIndex)
+                updateUndoRedoUi()
+            }
+        }
+
+        sheetBinding.gridRedoButton.setOnClickListener {
+            if (redoStack.isNotEmpty()) {
+                val nextState = redoStack.removeAt(redoStack.lastIndex)
+                historyStack.add(adapter.getPages().toList())
+                adapter.submitPages(nextState, currentPageIndex)
+                updateUndoRedoUi()
+            }
+        }
+
+        val itemTouchHelperCallback = object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN or ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT,
+            0
+        ) {
+            private var dragStartIndexList: List<Int>? = null
+
+            override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
+                super.onSelectedChanged(viewHolder, actionState)
+                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) {
+                    dragStartIndexList = adapter.getPages().toList()
+                }
+            }
+
+            override fun onMove(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                val fromPos = viewHolder.bindingAdapterPosition
+                val toPos = target.bindingAdapterPosition
+                if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) return false
+                adapter.moveItem(fromPos, toPos)
+                return true
+            }
+
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+                // Not used
+            }
+
+            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+                super.clearView(recyclerView, viewHolder)
+                adapter.notifyDataSetChanged()
+                val startList = dragStartIndexList
+                if (startList != null) {
+                    val currentList = adapter.getPages().toList()
+                    if (startList != currentList) {
+                        historyStack.add(startList)
+                        redoStack.clear()
+                        updateUndoRedoUi()
+                    }
+                    dragStartIndexList = null
+                }
+            }
+        }
+        val itemTouchHelper = ItemTouchHelper(itemTouchHelperCallback)
+        itemTouchHelper.attachToRecyclerView(sheetBinding.pagesGridRecyclerView)
+
+        updateUndoRedoUi()
+
+        dialog.setContentView(sheetBinding.root)
+        dialog.setOnDismissListener {
+            if (pagesGridDialog === dialog) {
+                pagesGridDialog = null
+            }
+        }
+        dialog.show()
+    }
+
+    private fun savePagesDirectly(
+        dialog: BottomSheetDialog,
+        sheetBinding: SheetViewerPagesGridBinding,
+        adapter: PdfGridAdapter,
+        targetPositionAfterSave: Int?
+    ) {
+        val currentUri = pdfUri ?: return
+        
+        dialog.setCancelable(false)
+        sheetBinding.gridCloseButton.isEnabled = false
+        sheetBinding.gridEditButton.isEnabled = false
+        sheetBinding.gridEditButton.text = "Saving..."
+        
+        lifecycleScope.launch {
+            val reorderedPages = adapter.getPages().toList()
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val context = this@PdfViewerActivity
+                    val localPdfFile = LocalPdfStore.requireLocalFile(context, currentUri)
+                    
+                    PDDocument.load(localPdfFile).use { document ->
+                        val originalPageCount = document.numberOfPages
+                        val pageObjects = (0 until originalPageCount).map { document.getPage(it) }
+                        
+                        for (i in (originalPageCount - 1) downTo 0) {
+                            document.removePage(i)
+                        }
+                        
+                        reorderedPages.forEach { oldPageIndex ->
+                            if (oldPageIndex in pageObjects.indices) {
+                                document.addPage(pageObjects[oldPageIndex])
+                            }
+                        }
+                        
+                        val tempFile = java.io.File(context.cacheDir, "temp_reorder_${System.currentTimeMillis()}.pdf")
+                        tempFile.parentFile?.mkdirs()
+                        FileOutputStream(tempFile).use { fos ->
+                            BufferedOutputStream(fos).use { bos ->
+                                document.save(bos)
+                            }
+                        }
+                        
+                        withContext(Dispatchers.Main) {
+                            closeCurrentPdf()
+                            recycleCachedBitmaps()
+                        }
+                        
+                        context.contentResolver.openOutputStream(currentUri)?.use { os ->
+                            tempFile.inputStream().use { input ->
+                                input.copyTo(os)
+                            }
+                        } ?: throw IOException("Cannot write to original PDF file")
+                        
+                        tempFile.copyTo(localPdfFile, overwrite = true)
+                        tempFile.delete()
+                    }
+                    reorderedPages.size
+                }
+            }
+            
+            result.onSuccess { newSize ->
+                dialog.dismiss()
+                
+                val oldPageIndex = currentPageIndex
+                val newPageIndex = if (targetPositionAfterSave != null) {
+                    targetPositionAfterSave.coerceIn(0, newSize - 1)
+                } else {
+                    val newIndexInReordered = reorderedPages.indexOf(oldPageIndex)
+                    if (newIndexInReordered != -1) {
+                        newIndexInReordered
+                    } else {
+                        oldPageIndex.coerceIn(0, newSize - 1)
+                    }
+                }
+                
+                persistReadingProgress(newPageIndex)
+                loadPdf()
+                Toast.makeText(this@PdfViewerActivity, "Changes saved successfully", Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                dialog.setCancelable(true)
+                sheetBinding.gridCloseButton.isEnabled = true
+                sheetBinding.gridEditButton.isEnabled = true
+                sheetBinding.gridEditButton.text = "Save Changes"
+                Toast.makeText(
+                    this@PdfViewerActivity,
+                    "Failed to save changes: ${error.localizedMessage}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun showDeletePageConfirmSheet(pagePosition: Int, onConfirmed: () -> Unit) {
+        val sheetBinding = SheetDeletePageConfirmBinding.inflate(layoutInflater)
+        val dialog = BottomSheetDialog(this)
+        
+        sheetBinding.confirmTitle.text = "Delete Page ${pagePosition + 1}?"
+        
+        sheetBinding.confirmCancelButton.setOnClickListener {
+            dialog.dismiss()
+        }
+        
+        sheetBinding.confirmDeleteButton.setOnClickListener {
+            dialog.dismiss()
+            onConfirmed()
+        }
+        
+        dialog.setContentView(sheetBinding.root)
+        dialog.show()
+    }
+
+    private fun showSettingsDialog() {
+        val sheetBinding = SheetReaderSettingsBinding.inflate(layoutInflater)
+        val dialog = BottomSheetDialog(this)
+        
+        sheetBinding.settingsDocName.text = pdfName
+        sheetBinding.settingsDocDetails.text = buildDocumentMeta()
+
+        val currentTheme = AppThemeStore.getThemeMode(this)
+        val checkedId = when (currentTheme) {
+            AppThemeStore.ThemeMode.SYSTEM -> R.id.themeSystemButton
+            AppThemeStore.ThemeMode.LIGHT -> R.id.themeLightButton
+            AppThemeStore.ThemeMode.DARK -> R.id.themeDarkButton
+        }
+        sheetBinding.settingsThemeToggleGroup.check(checkedId)
+
+        sheetBinding.settingsThemeToggleGroup.addOnButtonCheckedListener { _, checkedButtonId, isChecked ->
+            if (isChecked) {
+                val chosenMode = when (checkedButtonId) {
+                    R.id.themeSystemButton -> AppThemeStore.ThemeMode.SYSTEM
+                    R.id.themeLightButton -> AppThemeStore.ThemeMode.LIGHT
+                    R.id.themeDarkButton -> AppThemeStore.ThemeMode.DARK
+                    else -> AppThemeStore.ThemeMode.SYSTEM
+                }
+                if (chosenMode != AppThemeStore.getThemeMode(this)) {
+                    AppThemeStore.setThemeMode(this@PdfViewerActivity, chosenMode)
+                    dialog.dismiss()
+                }
+            }
+        }
+
+        val currentUri = pdfUri
+        val bookmarksList = if (currentUri != null) {
+            ReaderLibraryStore.getBookmarks(this, currentUri).toList().sorted()
+        } else {
+            emptyList()
+        }
+
+        sheetBinding.settingsNoBookmarksText.isVisible = bookmarksList.isEmpty()
+        sheetBinding.settingsBookmarksRecyclerView.isVisible = bookmarksList.isNotEmpty()
+
+        if (bookmarksList.isNotEmpty()) {
+            val bookmarkAdapter = BookmarkPageAdapter { targetPageIndex ->
+                scrollToPage(targetPageIndex, smooth = false)
+                dialog.dismiss()
+            }
+            sheetBinding.settingsBookmarksRecyclerView.layoutManager =
+                LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+            sheetBinding.settingsBookmarksRecyclerView.adapter = bookmarkAdapter
+            bookmarkAdapter.submitPages(bookmarksList)
+        }
+
+        dialog.setContentView(sheetBinding.root)
+        dialog.show()
     }
 
     private fun setupBackNavigation() {
@@ -237,7 +622,7 @@ class PdfViewerActivity : AppCompatActivity() {
         when {
             readerQuickActionsDialog?.isShowing == true -> readerQuickActionsDialog?.dismiss()
             jumpToPageDialog?.isShowing == true -> jumpToPageDialog?.dismiss()
-            startInReadMode && !isReaderChromeVisible -> setReaderChromeVisible(true)
+            pagesGridDialog?.isShowing == true -> pagesGridDialog?.dismiss()
             else -> finish()
         }
     }
@@ -251,6 +636,7 @@ class PdfViewerActivity : AppCompatActivity() {
             },
             onZoomChanged = ::handlePageZoomChanged,
             onDocumentScaleChanged = ::handleDocumentScaleChanged,
+            onScaleGestureFinished = ::handleGlobalScaleFinished,
             currentDocumentScale = { documentZoomScale },
             currentFitMode = { toZoomableFitMode(currentReaderFitMode) },
             fitPageHeightLimit = {
@@ -270,6 +656,14 @@ class PdfViewerActivity : AppCompatActivity() {
         binding.viewerPager.setItemViewCacheSize(1)
         binding.viewerPager.itemAnimator = null
         binding.viewerPager.userScrollEnabled = true
+
+        binding.viewerPager.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            val oldHeight = oldBottom - oldTop
+            val newHeight = bottom - top
+            if (newHeight > 0 && newHeight != oldHeight) {
+                pageAdapter.updateItemHeights(binding.viewerPager)
+            }
+        }
     }
 
     private fun setupThumbnailStrip() {
@@ -280,7 +674,7 @@ class PdfViewerActivity : AppCompatActivity() {
                 thumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }
             },
             onThumbnailTapped = { pageIndex ->
-                scrollToPage(pageIndex)
+                scrollToPage(pageIndex, smooth = false)
             }
         )
         binding.thumbnailRecyclerView.layoutManager =
@@ -293,12 +687,7 @@ class PdfViewerActivity : AppCompatActivity() {
     }
 
     private fun setupBookmarkStrip() {
-        bookmarkAdapter = BookmarkPageAdapter { pageIndex ->
-            scrollToPage(pageIndex)
-        }
-        binding.bookmarkRecyclerView.layoutManager =
-            LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
-        binding.bookmarkRecyclerView.adapter = bookmarkAdapter
+        // Bookmarks are now integrated as an option menu action item
     }
 
     private fun setupControls() {
@@ -323,11 +712,7 @@ class PdfViewerActivity : AppCompatActivity() {
         }
 
         binding.toggleThumbnailStripButton.setOnClickListener {
-            isThumbnailStripExpanded = !isThumbnailStripExpanded
-            updateThumbnailStripVisibility()
-            if (isThumbnailStripExpanded && pageCount > 0) {
-                updateThumbnailStripUi(currentPageIndex, smoothScroll = false)
-            }
+            toggleThumbnailStrip()
         }
 
         binding.viewerFitModeToggleGroup.check(
@@ -382,6 +767,10 @@ class PdfViewerActivity : AppCompatActivity() {
         val dialog = BottomSheetDialog(this)
         readerQuickActionsDialog = dialog
         dialog.setContentView(sheetBinding.root)
+
+        sheetBinding.readerToolsDocumentName.text = pdfName
+        sheetBinding.readerToolsDocumentMeta.text = buildDocumentMeta()
+        sheetBinding.readerToolsPageBadge.text = getString(R.string.viewer_page_counter, currentPageIndex + 1, pageCount)
 
         fun dismissThen(action: () -> Unit) {
             dialog.dismiss()
@@ -444,6 +833,18 @@ class PdfViewerActivity : AppCompatActivity() {
         )
     }
 
+    private fun openCurrentPdfEditorForReorder() {
+        val currentUri = pdfUri ?: return
+        persistReadingProgress(currentPageIndex)
+        startActivity(
+            PdfEditActivity.createReorderIntent(
+                context = this,
+                pdfUri = currentUri,
+                pdfName = pdfName
+            )
+        )
+    }
+
     private fun applyReaderMode(
         _mode: ReaderLibraryStore.ReaderMode,
         persistSelection: Boolean = true
@@ -484,9 +885,6 @@ class PdfViewerActivity : AppCompatActivity() {
         binding.jumpToPageButton.isEnabled = false
         binding.shareDocumentButton.isEnabled = pdfUri != null
         binding.toggleThumbnailStripButton.isEnabled = false
-        binding.bookmarkSummaryText.text = getString(R.string.viewer_saved_pages_title)
-        binding.bookmarkEmptyText.isVisible = true
-        binding.bookmarkRecyclerView.isVisible = false
         isThumbnailStripExpanded = false
         binding.thumbnailStripContainer.isVisible = false
         binding.viewerZoomHint.isVisible = false
@@ -496,7 +894,6 @@ class PdfViewerActivity : AppCompatActivity() {
         binding.resetReaderZoomButton.isEnabled = false
         pageAdapter.submitPages(emptyList())
         thumbnailAdapter.submitPages(emptyList())
-        bookmarkAdapter.submitPages(emptyList())
         applyReaderMode(currentReaderMode, persistSelection = false)
     }
 
@@ -507,10 +904,9 @@ class PdfViewerActivity : AppCompatActivity() {
                 runCatching { openPdf() }
             }
 
-            result.onSuccess { openedPdf ->
-                fileDescriptor = openedPdf.fileDescriptor
-                renderer = openedPdf.renderer
-                pageCount = openedPdf.renderer.pageCount
+            result.onSuccess { openedRenderer ->
+                renderer = openedRenderer
+                pageCount = openedRenderer.pageCount
                 projectLinkMap = resolveProjectLinkMap()
 
                 pageAdapter.submitPages((0 until pageCount).toList())
@@ -557,52 +953,57 @@ class PdfViewerActivity : AppCompatActivity() {
         }
     }
 
-    private fun openPdf(): OpenedPdf {
+    private suspend fun openPdf(): PdfiumPageRenderer {
         val inputUri = pdfUri ?: throw IOException(getString(R.string.cannot_open_pdf))
-        val localPdf = LocalPdfStore.prepareForRead(this, inputUri, pdfName)
-        pdfUri = localPdf.uri
+        // Zero-copy open: render straight from the source descriptor. No more
+        // duplicating the whole file into internal storage, so 800 MB - 1 GB
+        // PDFs open instantly and never fail for lack of free space.
+        val descriptor = LocalPdfStore.openSourceDescriptor(this, inputUri)
+            ?: throw IOException(getString(R.string.cannot_open_pdf))
         if (pdfName.isBlank()) {
-            pdfName = localPdf.displayName
+            pdfName = LocalPdfStore.queryDisplayName(this, inputUri).orEmpty()
         }
-        pdfSizeBytes = localPdf.sizeBytes
-        val descriptor = ParcelFileDescriptor.open(
-            localPdf.file,
-            ParcelFileDescriptor.MODE_READ_ONLY
-        ) ?: throw IOException(getString(R.string.cannot_open_pdf))
-        val pdfRenderer = PdfRenderer(descriptor)
-        if (pdfRenderer.pageCount == 0) {
-            pdfRenderer.close()
-            descriptor.close()
+        pdfSizeBytes = LocalPdfStore.queryFileSize(this, inputUri)
+        val pageRenderer = try {
+            PdfiumPageRenderer.open(descriptor)
+        } catch (error: Throwable) {
+            runCatching { descriptor.close() }
+            throw IOException(getString(R.string.cannot_open_pdf), error)
+        }
+        if (pageRenderer.pageCount == 0) {
+            pageRenderer.close()
             throw IOException(getString(R.string.empty_pdf))
         }
-        return OpenedPdf(descriptor, pdfRenderer)
+        return pageRenderer
     }
 
     private suspend fun renderPageBitmap(pageIndex: Int, targetWidth: Int): Bitmap {
         pageCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return it }
         val activeRenderer = renderer ?: throw IOException(getString(R.string.cannot_open_pdf))
-        val safeTargetWidth = targetWidth.coerceAtLeast(resources.displayMetrics.widthPixels)
+        // Render above the on-screen width so the page stays sharp when the
+        // user pinch-zooms in. The per-bitmap pixel budget still caps the
+        // allocation, so this can't blow up memory on huge documents.
+        val safeTargetWidth = (
+            targetWidth.coerceAtLeast(resources.displayMetrics.widthPixels) * VIEWER_RENDER_QUALITY
+            ).roundToInt()
 
         return withContext(Dispatchers.IO) {
             renderMutex.withLock {
                 pageCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return@withLock it }
-
-                activeRenderer.openPage(pageIndex).use { page ->
-                    val bitmap = renderPdfPageWithFallback(
-                        page = page,
-                        targetWidth = safeTargetWidth.toFloat(),
-                        maxDimension = PAGE_MAX_DIMENSION,
-                        trimWhitespace = shouldTrimWhitespaceForPage(pageIndex)
-                    )
-                    pageCache.put(pageIndex, bitmap)
-                    bitmap
-                }
+                val bitmap = renderPageWithFallback(
+                    activeRenderer = activeRenderer,
+                    pageIndex = pageIndex,
+                    targetWidth = safeTargetWidth.toFloat(),
+                    maxDimension = PAGE_MAX_DIMENSION,
+                )
+                pageCache.put(pageIndex, bitmap)
+                bitmap
             }
         }
     }
 
     private fun shouldTrimWhitespaceForPage(pageIndex: Int): Boolean {
-        return projectLinkMap[pageIndex].isNullOrEmpty()
+        return false
     }
 
     private suspend fun renderThumbnailBitmap(pageIndex: Int): Bitmap {
@@ -612,78 +1013,57 @@ class PdfViewerActivity : AppCompatActivity() {
         return withContext(Dispatchers.IO) {
             renderMutex.withLock {
                 thumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return@withLock it }
+                val bitmap = renderPageWithFallback(
+                    activeRenderer = activeRenderer,
+                    pageIndex = pageIndex,
+                    targetWidth = THUMBNAIL_TARGET_WIDTH.toFloat(),
+                    maxDimension = THUMBNAIL_MAX_DIMENSION,
+                )
+                thumbnailCache.put(pageIndex, bitmap)
+                bitmap
+            }
+        }
+    }
 
-                activeRenderer.openPage(pageIndex).use { page ->
-                    val bitmap = renderPdfPageWithFallback(
-                        page = page,
-                        targetWidth = THUMBNAIL_TARGET_WIDTH.toFloat(),
-                        maxDimension = THUMBNAIL_MAX_DIMENSION,
-                        trimWhitespace = true
-                    )
-                    thumbnailCache.put(pageIndex, bitmap)
-                    bitmap
+    private suspend fun renderPageWithFallback(
+        activeRenderer: PdfiumPageRenderer,
+        pageIndex: Int,
+        targetWidth: Float,
+        maxDimension: Float,
+    ): Bitmap {
+        if (pageIndex < 0 || pageIndex >= activeRenderer.pageCount) {
+            throw IOException("Page index $pageIndex is out of bounds (0..${activeRenderer.pageCount - 1})")
+        }
+        var lastError: Throwable? = null
+        RENDER_FALLBACK_FACTORS.forEach { factor ->
+            try {
+                // Shrink both the max dimension and the pixel budget on each
+                // retry so a page that just OOM'd gets a genuinely smaller
+                // allocation the next time around.
+                return activeRenderer.renderPage(
+                    pageIndex = pageIndex,
+                    targetWidth = targetWidth,
+                    maxDimension = maxDimension * factor,
+                    maxPixels = (maxPageBitmapPixels * factor * factor).toLong(),
+                )
+            } catch (cancellation: CancellationException) {
+                // The render was cancelled (e.g. the user swiped to another
+                // page before this one finished). This is normal control flow,
+                // not a render failure: let it propagate so structured
+                // concurrency stays intact and we don't log a bogus error.
+                throw cancellation
+            } catch (error: Throwable) {
+                lastError = error
+                if (error is OutOfMemoryError) {
+                    // Free whatever we can so the next (smaller) attempt has
+                    // room, then nudge the collector before retrying.
+                    pageCache.evictAll()
+                    thumbnailCache.evictAll()
+                    System.gc()
                 }
             }
         }
-    }
-
-    private fun renderPdfPageWithFallback(
-        page: PdfRenderer.Page,
-        targetWidth: Float,
-        maxDimension: Float,
-        trimWhitespace: Boolean
-    ): Bitmap {
-        var lastError: Throwable? = null
-        RENDER_FALLBACK_FACTORS.forEachIndexed { index, factor ->
-            val attemptTrim = trimWhitespace && index == 0
-            try {
-                return renderPdfPage(
-                    page = page,
-                    targetWidth = targetWidth,
-                    maxDimension = maxDimension * factor,
-                    trimWhitespace = attemptTrim
-                )
-            } catch (error: Throwable) {
-                lastError = error
-            }
-        }
-        throw IOException(
-            "Failed to render page ${page.index}",
-            lastError
-        )
-    }
-
-    private fun renderPdfPage(
-        page: PdfRenderer.Page,
-        targetWidth: Float,
-        maxDimension: Float,
-        trimWhitespace: Boolean
-    ): Bitmap {
-        val pageWidth = page.width.toFloat().coerceAtLeast(1f)
-        val pageHeight = page.height.toFloat().coerceAtLeast(1f)
-        val widthScale = targetWidth.coerceAtLeast(1f) / pageWidth
-        val currentMax = max(pageWidth, pageHeight).coerceAtLeast(1f)
-        val maxSafeScale = maxDimension.coerceAtLeast(1f) / currentMax
-        val renderScale = min(1f, min(widthScale, maxSafeScale)).coerceAtLeast(MIN_RENDER_SCALE)
-        val width = (page.width * renderScale).roundToInt().coerceAtLeast(1)
-        val height = (page.height * renderScale).roundToInt().coerceAtLeast(1)
-        var bitmap: Bitmap? = null
-        try {
-            bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            canvas.drawColor(Color.WHITE)
-            val matrix = Matrix().apply {
-                postScale(renderScale, renderScale)
-            }
-            page.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-            if (trimWhitespace && shouldTrimViewerWhitespace(bitmap)) {
-                return trimViewerWhitespace(bitmap)
-            }
-            return bitmap
-        } catch (error: Throwable) {
-            bitmap?.recycle()
-            throw error
-        }
+        throw IOException("Failed to render page $pageIndex", lastError)
     }
 
     private fun shouldTrimViewerWhitespace(bitmap: Bitmap): Boolean {
@@ -872,11 +1252,13 @@ class PdfViewerActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateBookmarkUi(_currentPage: Int) {
-        binding.bookmarkSummaryText.isVisible = false
-        binding.bookmarkEmptyText.isVisible = false
-        binding.bookmarkRecyclerView.isVisible = false
-        bookmarkAdapter.submitPages(emptyList())
+    private fun updateBookmarkUi(position: Int) {
+        if (position < 0) return
+        val currentUri = pdfUri ?: return
+        val bookmarks = ReaderLibraryStore.getBookmarks(this, currentUri)
+        val isBookmarked = position in bookmarks
+        val bookmarkItem = binding.viewerToolbar.menu.findItem(R.id.action_bookmark)
+        bookmarkItem?.setIcon(if (isBookmarked) R.drawable.ic_star_20 else R.drawable.ic_star_outline_20)
     }
 
     private fun showJumpToPageDialog() {
@@ -1004,7 +1386,7 @@ class PdfViewerActivity : AppCompatActivity() {
     ): RectF {
         val minDimension = min(pageWidth, pageHeight).coerceAtLeast(1f)
         textPaint.textSize =
-            (minDimension * operation.textSizeRatio).coerceIn(18f, 84f)
+            (minDimension * operation.textSizeRatio).coerceIn(10f, 350f)
         textPaint.typeface = if (operation.isBold) {
             Typeface.DEFAULT_BOLD
         } else {
@@ -1072,24 +1454,23 @@ class PdfViewerActivity : AppCompatActivity() {
                 runCatching {
                     contentResolver.openOutputStream(outputUri)?.use { outputStream ->
                         renderMutex.withLock {
-                            activeRenderer.openPage(pageIndex).use { page ->
-                                val targetWidth = max(
-                                    resources.displayMetrics.widthPixels * 2,
-                                    page.width
-                                )
-                                val bitmap = renderPdfPageWithFallback(
-                                    page = page,
-                                    targetWidth = targetWidth.toFloat(),
-                                    maxDimension = PAGE_MAX_DIMENSION,
-                                    trimWhitespace = false
-                                )
-                                try {
-                                    if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)) {
-                                        throw IOException(getString(R.string.viewer_save_page_image_failed, getString(R.string.unknown_error)))
-                                    }
-                                } finally {
-                                    bitmap.recycle()
+                            val (pageWidthPts, _) = activeRenderer.pageSizePoints(pageIndex)
+                            val targetWidth = max(
+                                resources.displayMetrics.widthPixels * 2,
+                                pageWidthPts
+                            )
+                            val bitmap = renderPageWithFallback(
+                                activeRenderer = activeRenderer,
+                                pageIndex = pageIndex,
+                                targetWidth = targetWidth.toFloat(),
+                                maxDimension = PAGE_MAX_DIMENSION,
+                            )
+                            try {
+                                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)) {
+                                    throw IOException(getString(R.string.viewer_save_page_image_failed, getString(R.string.unknown_error)))
                                 }
+                            } finally {
+                                bitmap.recycle()
                             }
                         }
                     } ?: throw IOException(getString(R.string.cannot_write_pdf))
@@ -1159,9 +1540,6 @@ class PdfViewerActivity : AppCompatActivity() {
         }
 
         val targetPage = pageIndex.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
-        if (targetPage != currentPageIndex && documentZoomScale > 1.01f) {
-            resetReaderZoom()
-        }
         if (smooth) {
             binding.viewerPager.smoothScrollToPosition(targetPage)
         } else {
@@ -1204,9 +1582,6 @@ class PdfViewerActivity : AppCompatActivity() {
         scheduleThumbnailPrefetch(bestPage)
 
         if (bestPage != currentPageIndex) {
-            if (documentZoomScale > 1.01f) {
-                resetReaderZoom()
-            }
             updateReaderUi(bestPage)
         }
     }
@@ -1285,6 +1660,8 @@ class PdfViewerActivity : AppCompatActivity() {
             activeJobs[pageIndex] = lifecycleScope.launch {
                 try {
                     renderBlock(pageIndex)
+                } catch (e: Exception) {
+                    // Suppress prefetch errors (normal if renderer gets closed or document changes)
                 } finally {
                     activeJobs.remove(pageIndex)
                 }
@@ -1308,7 +1685,7 @@ class PdfViewerActivity : AppCompatActivity() {
     private fun setReaderChromeVisible(isVisible: Boolean) {
         isReaderChromeVisible = isVisible
         binding.viewerToolbar.isVisible = isVisible
-        binding.viewerControlsPanel.isVisible = isVisible
+        binding.viewerControlsPanel.isVisible = false
         binding.readerQuickActionsButton.isVisible = startInReadMode && !isVisible
         updateThumbnailStripVisibility()
         updateZoomHint()
@@ -1333,6 +1710,7 @@ class PdfViewerActivity : AppCompatActivity() {
         }
         documentZoomScale = 1f
         if (pageCount > 0) {
+            binding.viewerPager.userScrollEnabled = true
             pageAdapter.applyDocumentTransform(
                 recyclerView = binding.viewerPager,
                 scale = documentZoomScale,
@@ -1344,6 +1722,7 @@ class PdfViewerActivity : AppCompatActivity() {
 
     private fun resetReaderZoom() {
         documentZoomScale = 1f
+        binding.viewerPager.userScrollEnabled = true
         pageAdapter.applyDocumentTransform(
             recyclerView = binding.viewerPager,
             scale = documentZoomScale,
@@ -1353,9 +1732,27 @@ class PdfViewerActivity : AppCompatActivity() {
     }
 
     private fun handlePageZoomChanged(pageIndex: Int, isZoomed: Boolean) {
-        if (pageIndex == currentPageIndex && !isZoomed && documentZoomScale > 1.01f) {
-            documentZoomScale = 1f
-        }
+        // With document-level zoom, ZoomableImageView normalizedScale stays
+        // at 1.0 after gesture end (applyDocumentTransform resets it).
+        // The zoom state is managed through documentZoomScale and page card
+        // height, so we only need to update the hint.
+        updateZoomHint()
+    }
+
+    private fun handleGlobalScaleFinished(pageIndex: Int, scale: Float) {
+        val clampedScale = scale.coerceIn(1f, 4f)
+        documentZoomScale = clampedScale
+        // Apply the document scale to ALL visible page holders (including the
+        // page the user just pinched). Each holder resets its ZoomableImageView
+        // back to fit-mode and then applies the shared document scale, so every
+        // page shows its full content at the same zoom level – just like
+        // Google Docs viewer.
+        pageAdapter.applyDocumentTransform(
+            recyclerView = binding.viewerPager,
+            scale = documentZoomScale,
+            fitMode = toZoomableFitMode(currentReaderFitMode)
+        )
+        pageAdapter.updateItemHeights(binding.viewerPager)
         updateZoomHint()
     }
 
@@ -1370,17 +1767,16 @@ class PdfViewerActivity : AppCompatActivity() {
     }
 
     private fun handleDocumentScaleChanged(pageIndex: Int, scale: Float) {
+        // The page under the gesture scales itself smoothly through its own
+        // matrix (ZoomableImageView). Propagating the scale to every visible
+        // holder and relaying out the list on each gesture frame is what made
+        // zoom feel slow and stuttery, so we only track the lightweight state
+        // here and let the focused view own the visual zoom.
         val clampedScale = scale.coerceIn(1f, 4f)
         if (abs(clampedScale - documentZoomScale) < 0.01f) {
             return
         }
         documentZoomScale = clampedScale
-        pageAdapter.applyDocumentTransform(
-            recyclerView = binding.viewerPager,
-            scale = documentZoomScale,
-            fitMode = toZoomableFitMode(currentReaderFitMode),
-            excludedPageIndex = pageIndex
-        )
         updateZoomHint()
     }
 
@@ -1470,12 +1866,12 @@ class PdfViewerActivity : AppCompatActivity() {
     override fun onDestroy() {
         readerQuickActionsDialog?.dismiss()
         jumpToPageDialog?.dismiss()
+        pagesGridDialog?.dismiss()
         cancelPrefetchJobs(pagePrefetchJobs)
         cancelPrefetchJobs(thumbnailPrefetchJobs)
         binding.viewerPager.removeOnScrollListener(pageScrollListener)
         binding.viewerPager.adapter = null
         binding.thumbnailRecyclerView.adapter = null
-        binding.bookmarkRecyclerView.adapter = null
         closeCurrentPdf()
         recycleCachedBitmaps()
         super.onDestroy()
@@ -1483,9 +1879,7 @@ class PdfViewerActivity : AppCompatActivity() {
 
     private fun closeCurrentPdf() {
         renderer?.close()
-        fileDescriptor?.close()
         renderer = null
-        fileDescriptor = null
         pageCount = 0
     }
 
@@ -1500,7 +1894,8 @@ class PdfViewerActivity : AppCompatActivity() {
         private const val EXTRA_START_IN_READ_MODE = "extra_start_in_read_mode"
         private const val DEFAULT_CACHE_SIZE_KB = 24 * 1024
         private const val THUMBNAIL_CACHE_SIZE_KB = 6 * 1024
-        private const val PAGE_MAX_DIMENSION = 2600f
+        private const val PAGE_MAX_DIMENSION = 4000f
+        private const val VIEWER_RENDER_QUALITY = 2f
         private const val THUMBNAIL_MAX_DIMENSION = 420f
         private const val THUMBNAIL_TARGET_WIDTH = 220
         private const val VIEWER_TRIM_PADDING_DP = 8f
@@ -1517,9 +1912,11 @@ class PdfViewerActivity : AppCompatActivity() {
             startInReadMode: Boolean = false
         ): Intent {
             return Intent(context, PdfViewerActivity::class.java).apply {
+                data = pdfUri
                 putExtra(EXTRA_PDF_URI, pdfUri.toString())
                 putExtra(EXTRA_PDF_NAME, pdfName)
                 putExtra(EXTRA_START_IN_READ_MODE, startInReadMode)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
     }
@@ -1531,6 +1928,7 @@ private class PdfPageAdapter(
     private val cachedPageBitmap: (pageIndex: Int) -> Bitmap?,
     private val onZoomChanged: (Int, Boolean) -> Unit,
     private val onDocumentScaleChanged: (Int, Float) -> Unit,
+    private val onScaleGestureFinished: (Int, Float) -> Unit,
     private val currentDocumentScale: () -> Float,
     private val currentFitMode: () -> ZoomableImageView.FitMode,
     private val fitPageHeightLimit: () -> Int,
@@ -1583,13 +1981,19 @@ private class PdfPageAdapter(
         activeRenderEnd = newEnd
 
         val affectedPositions = linkedSetOf<Int>()
+        // Notify items that transitioned from active to inactive
         if (oldEnd >= oldStart) {
             for (position in oldStart..oldEnd) {
-                affectedPositions += position
+                if (position !in newStart..newEnd) {
+                    affectedPositions += position
+                }
             }
         }
+        // Notify items that transitioned from inactive to active
         for (position in newStart..newEnd) {
-            affectedPositions += position
+            if (oldEnd < oldStart || position !in oldStart..oldEnd) {
+                affectedPositions += position
+            }
         }
         affectedPositions.forEach { position ->
             if (position in pages.indices) {
@@ -1670,6 +2074,24 @@ private class PdfPageAdapter(
         }
     }
 
+    fun updateItemHeights(recyclerView: RecyclerView) {
+        for (childIndex in 0 until recyclerView.childCount) {
+            val child = recyclerView.getChildAt(childIndex) ?: continue
+            val holder = recyclerView.getChildViewHolder(child) as? PageViewHolder ?: continue
+            holder.updateItemHeight()
+        }
+    }
+
+    fun updatePageLayout(recyclerView: RecyclerView, pageIndex: Int) {
+        for (childIndex in 0 until recyclerView.childCount) {
+            val child = recyclerView.getChildAt(childIndex) ?: continue
+            val holder = recyclerView.getChildViewHolder(child) as? PageViewHolder ?: continue
+            if (holder.boundPageIndex == pageIndex) {
+                holder.updateItemHeight()
+            }
+        }
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageViewHolder {
         val binding = ItemPdfPageBinding.inflate(
             LayoutInflater.from(parent.context),
@@ -1703,49 +2125,75 @@ private class PdfPageAdapter(
         private var renderedBitmapWidth: Int = 0
         private var renderedBitmapHeight: Int = 0
 
-        private fun updatePageImageHeight() {
-            if (renderedTargetWidth <= 0 || renderedBitmapWidth <= 0 || renderedBitmapHeight <= 0) {
-                return
-            }
-            val targetWidth = renderedTargetWidth
-            val bitmapWidth = renderedBitmapWidth
-            val bitmapHeight = renderedBitmapHeight
-            val resolvedWidth = targetWidth.coerceAtLeast(1)
-            val baseHeight = (
-                resolvedWidth.toFloat() *
-                    (bitmapHeight.coerceAtLeast(1).toFloat() / bitmapWidth.coerceAtLeast(1).toFloat())
-                ).roundToInt().coerceAtLeast(1)
+        fun updateItemHeight() {
             val fitMode = currentFitMode()
-            val resolvedHeight = if (fitMode == ZoomableImageView.FitMode.FIT_PAGE) {
-                min(baseHeight, fitPageHeightLimit().coerceAtLeast(1))
+            val isSinglePage = getItemCount() == 1
+            val zoomScale = currentDocumentScale().coerceIn(1f, 4f)
+
+            val targetWidth = if (renderedTargetWidth > 0) {
+                renderedTargetWidth
+            } else if (binding.pageImage.width > 0) {
+                binding.pageImage.width
             } else {
-                baseHeight
+                binding.root.resources.displayMetrics.widthPixels
+            }
+
+            val baseContentHeight = if (renderedBitmapWidth > 0 && renderedBitmapHeight > 0) {
+                val resolvedWidth = targetWidth.coerceAtLeast(1)
+                val baseHeight = (
+                    resolvedWidth.toFloat() *
+                        (renderedBitmapHeight.coerceAtLeast(1).toFloat() / renderedBitmapWidth.coerceAtLeast(1).toFloat())
+                    ).roundToInt().coerceAtLeast(1)
+                if (fitMode == ZoomableImageView.FitMode.FIT_PAGE) {
+                    min(baseHeight, fitPageHeightLimit().coerceAtLeast(1))
+                } else {
+                    baseHeight
+                }
+            } else {
+                val metrics = binding.root.resources.displayMetrics
+                val resolvedWidth = targetWidth.coerceAtLeast(metrics.widthPixels.coerceAtLeast(1))
+                val minHeight = (metrics.density * PAGE_PLACEHOLDER_MIN_HEIGHT_DP).roundToInt()
+                val maxHeight = (metrics.heightPixels * PAGE_PLACEHOLDER_MAX_HEIGHT_RATIO)
+                    .roundToInt()
+                    .coerceAtLeast(minHeight)
+                val placeholderHeight = (
+                    resolvedWidth * PAGE_PLACEHOLDER_ASPECT_RATIO
+                    ).roundToInt()
+                    .coerceIn(minHeight, maxHeight)
+                if (fitMode == ZoomableImageView.FitMode.FIT_PAGE) {
+                    min(placeholderHeight, fitPageHeightLimit().coerceAtLeast(minHeight))
+                } else {
+                    placeholderHeight
+                }
+            }
+            val contentHeight = (baseContentHeight * zoomScale)
+                .roundToInt()
+                .coerceAtLeast(1)
+
+            val limit = fitPageHeightLimit()
+            // Only center within a full-screen slot for a single-page document.
+            // For multi-page documents, wrap the content so pages stack tightly
+            // instead of leaving large empty gaps around short/landscape pages.
+            val shouldCenter = isSinglePage && contentHeight < limit
+
+            binding.root.updateLayoutParams<ViewGroup.LayoutParams> {
+                height = if (shouldCenter) {
+                    limit
+                } else {
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                }
             }
             binding.pageImage.updateLayoutParams<ViewGroup.LayoutParams> {
-                height = resolvedHeight
+                height = contentHeight
             }
         }
 
+        private fun updatePageImageHeight() {
+            updateItemHeight()
+        }
+
         private fun applyPlaceholderHeight(targetWidth: Int) {
-            val metrics = binding.root.resources.displayMetrics
-            val resolvedWidth = targetWidth.coerceAtLeast(metrics.widthPixels.coerceAtLeast(1))
-            val minHeight = (metrics.density * PAGE_PLACEHOLDER_MIN_HEIGHT_DP).roundToInt()
-            val maxHeight = (metrics.heightPixels * PAGE_PLACEHOLDER_MAX_HEIGHT_RATIO)
-                .roundToInt()
-                .coerceAtLeast(minHeight)
-            val placeholderHeight = (
-                resolvedWidth * PAGE_PLACEHOLDER_ASPECT_RATIO
-                ).roundToInt()
-                .coerceIn(minHeight, maxHeight)
-            val fitMode = currentFitMode()
-            val resolvedHeight = if (fitMode == ZoomableImageView.FitMode.FIT_PAGE) {
-                min(placeholderHeight, fitPageHeightLimit().coerceAtLeast(minHeight))
-            } else {
-                placeholderHeight
-            }
-            binding.pageImage.updateLayoutParams<ViewGroup.LayoutParams> {
-                height = resolvedHeight
-            }
+            updateItemHeight()
         }
 
         private fun showRenderedBitmap(bitmap: Bitmap, targetWidth: Int) {
@@ -1753,18 +2201,16 @@ private class PdfPageAdapter(
             renderedBitmapWidth = bitmap.width
             renderedBitmapHeight = bitmap.height
             updatePageImageHeight()
+            binding.pageImage.documentZoomScale = currentDocumentScale()
             binding.pageImage.setFitMode(currentFitMode(), dispatchScaleChange = false)
             binding.pageImage.setImageBitmap(bitmap)
-            binding.pageImage.post {
-                if (boundPageIndex != RecyclerView.NO_POSITION) {
-                    binding.pageImage.applySharedScale(currentDocumentScale())
-                }
-            }
             binding.pageLoading.isVisible = false
             binding.pageError.isVisible = false
         }
 
         fun bind(pageIndex: Int, displayPosition: Int) {
+            updateItemHeight()
+
             val isSamePageRebind = boundPageIndex == pageIndex
             if (boundPageIndex != RecyclerView.NO_POSITION && !isSamePageRebind) {
                 onZoomChanged(boundPageIndex, false)
@@ -1811,6 +2257,15 @@ private class PdfPageAdapter(
                     onDocumentScaleChanged(pageIndex, scale)
                 }
             }
+            binding.pageImage.onScaleEnd = {
+                if (boundPageIndex == pageIndex) {
+                    onScaleGestureFinished(pageIndex, binding.pageImage.let {
+                        // Read the current normalizedScale from the image view
+                        currentDocumentScale()
+                    })
+                }
+            }
+            binding.pageImage.documentZoomScale = currentDocumentScale()
             binding.pageImage.setFitMode(currentFitMode(), dispatchScaleChange = false)
 
             val targetWidthHint = if (binding.pageImage.width > 0) {
@@ -1891,6 +2346,7 @@ private class PdfPageAdapter(
                 onZoomChanged(boundPageIndex, false)
             }
             boundPageIndex = RecyclerView.NO_POSITION
+            binding.pageImage.documentZoomScale = 1f
             binding.pageImage.onZoomChanged = null
             binding.pageImage.onScaleChanged = null
             binding.pageImage.onSingleTapPoint = null
@@ -1907,15 +2363,30 @@ private class PdfPageAdapter(
             binding.pageError.isVisible = false
         }
 
+        @Suppress("UNUSED_PARAMETER")
         fun applyDocumentTransform(scale: Float, fitMode: ZoomableImageView.FitMode) {
             if (boundPageIndex == RecyclerView.NO_POSITION) {
                 return
             }
+            val isSinglePage = getItemCount() == 1
+            val shouldCenter = isSinglePage
+            binding.root.updateLayoutParams<ViewGroup.LayoutParams> {
+                height = if (shouldCenter) {
+                    fitPageHeightLimit()
+                } else {
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                }
+            }
             updatePageImageHeight()
+            // Reset the image view to fit-width with normalizedScale = 1.
+            // The document-level zoom is expressed purely through the taller
+            // page card height (computed in updateItemHeight with zoomScale).
+            // This ensures the full page content is always visible, like
+            // Google Docs viewer, instead of showing a zoomed/panned crop.
             binding.pageImage.post {
                 if (boundPageIndex != RecyclerView.NO_POSITION) {
+                    binding.pageImage.documentZoomScale = scale
                     binding.pageImage.setFitMode(fitMode, dispatchScaleChange = false)
-                    binding.pageImage.applySharedScale(scale)
                 }
             }
         }
@@ -2102,6 +2573,152 @@ private class PdfThumbnailAdapter(
             binding.thumbnailImage.setImageDrawable(null)
             binding.thumbnailLoading.isVisible = false
             binding.root.setOnClickListener(null)
+        }
+    }
+}
+
+private class PdfGridAdapter(
+    private val scope: CoroutineScope,
+    private val renderThumbnail: suspend (pageIndex: Int) -> Bitmap,
+    private val cachedThumbnailBitmap: (pageIndex: Int) -> Bitmap?,
+    private val onPageTapped: (position: Int, pageIndex: Int) -> Unit,
+    private val onDeleteTapped: (position: Int) -> Unit,
+    private val onPagesChanged: () -> Unit
+) : RecyclerView.Adapter<PdfGridAdapter.GridViewHolder>() {
+
+    private val pages = mutableListOf<Int>()
+    private var selectedPage: Int = -1
+
+    init {
+        setHasStableIds(true)
+    }
+
+    fun submitPages(newPages: List<Int>, activePage: Int) {
+        pages.clear()
+        pages.addAll(newPages)
+        selectedPage = activePage
+        notifyDataSetChanged()
+    }
+
+    fun getPages(): List<Int> = pages
+
+    fun moveItem(fromPosition: Int, toPosition: Int) {
+        if (fromPosition !in pages.indices || toPosition !in pages.indices) return
+        if (fromPosition < toPosition) {
+            for (i in fromPosition until toPosition) {
+                java.util.Collections.swap(pages, i, i + 1)
+            }
+        } else {
+            for (i in fromPosition downTo toPosition + 1) {
+                java.util.Collections.swap(pages, i, i - 1)
+            }
+        }
+        notifyItemMoved(fromPosition, toPosition)
+        onPagesChanged()
+    }
+
+    fun removeItem(position: Int) {
+        if (position in pages.indices) {
+            pages.removeAt(position)
+            notifyItemRemoved(position)
+            notifyItemRangeChanged(position, pages.size - position)
+            onPagesChanged()
+        }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): GridViewHolder {
+        val binding = ItemPdfGridPageBinding.inflate(
+            LayoutInflater.from(parent.context),
+            parent,
+            false
+        )
+        return GridViewHolder(binding)
+    }
+
+    override fun onBindViewHolder(holder: GridViewHolder, position: Int) {
+        holder.bind(pages[position], position, pages[position] == selectedPage)
+    }
+
+    override fun onViewRecycled(holder: GridViewHolder) {
+        holder.recycle()
+        super.onViewRecycled(holder)
+    }
+
+    override fun getItemCount(): Int = pages.size
+    override fun getItemId(position: Int): Long = pages[position].toLong()
+
+    inner class GridViewHolder(
+        private val binding: ItemPdfGridPageBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
+
+        private var renderJob: Job? = null
+        private var boundPageIndex: Int = RecyclerView.NO_POSITION
+
+        fun bind(pageIndex: Int, displayPosition: Int, isSelected: Boolean) {
+            boundPageIndex = pageIndex
+            renderJob?.cancel()
+            binding.gridPageNumber.text = (displayPosition + 1).toString()
+            val context = binding.root.context
+            binding.gridPageCard.strokeColor =
+                context.getColor(
+                    if (isSelected) R.color.thumbnail_selected else R.color.thumbnail_unselected
+                )
+            binding.gridPageCard.strokeWidth = if (isSelected) 3 else 1
+            binding.gridPageCard.setCardBackgroundColor(
+                context.getColor(
+                    if (isSelected) R.color.button_secondary_bg else R.color.card_surface_strong
+                )
+            )
+            binding.gridPageNumber.alpha = if (isSelected) 1f else 0.82f
+            binding.root.alpha = if (isSelected) 1f else 0.92f
+            
+            binding.root.setOnClickListener {
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onPageTapped(pos, pageIndex)
+                }
+            }
+
+            binding.gridPageDeleteButton.setOnClickListener {
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onDeleteTapped(pos)
+                }
+            }
+
+            val cachedBitmap = cachedThumbnailBitmap(pageIndex)
+            if (cachedBitmap != null) {
+                binding.gridPageImage.setImageBitmap(cachedBitmap)
+                binding.gridPageLoading.isVisible = false
+                return
+            }
+
+            binding.gridPageImage.setImageDrawable(null)
+            binding.gridPageLoading.isVisible = true
+            renderJob = scope.launch {
+                runCatching { renderThumbnail(pageIndex) }
+                    .onSuccess { bitmap ->
+                        if (boundPageIndex == pageIndex) {
+                            binding.gridPageImage.setImageBitmap(bitmap)
+                            binding.gridPageLoading.isVisible = false
+                        }
+                    }
+                    .onFailure {
+                        if (boundPageIndex == pageIndex) {
+                            binding.gridPageLoading.isVisible = false
+                        }
+                    }
+            }
+        }
+
+        fun recycle() {
+            renderJob?.cancel()
+            renderJob = null
+            boundPageIndex = RecyclerView.NO_POSITION
+            binding.gridPageImage.setImageDrawable(null)
+            binding.gridPageLoading.isVisible = false
+            binding.root.setOnClickListener(null)
+            binding.gridPageDeleteButton.setOnClickListener(null)
         }
     }
 }

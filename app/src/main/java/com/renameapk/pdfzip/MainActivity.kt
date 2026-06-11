@@ -31,6 +31,14 @@ import androidx.core.view.updatePadding
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.renameapk.pdfzip.databinding.ItemPdfGridPageBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import android.view.ViewGroup
+import android.util.LruCache
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -242,6 +250,7 @@ class MainActivity : AppCompatActivity() {
     )
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var recentDocumentsAdapter: RecentDocumentsAdapter
 
     private var selectedPdfUri: Uri? = null
     private var selectedPdfName: String? = null
@@ -264,7 +273,23 @@ class MainActivity : AppCompatActivity() {
     private var homeContentBasePaddingTop = 0
     private var homeContentBasePaddingRight = 0
     private var homeContentBasePaddingBottom = 0
+    private var stickyHeaderBasePaddingLeft = 0
+    private var stickyHeaderBasePaddingTop = 0
+    private var stickyHeaderBasePaddingRight = 0
+    private var stickyHeaderBasePaddingBottom = 0
+    private var toolPanelContainerBasePaddingLeft = 0
+    private var toolPanelContainerBasePaddingTop = 0
+    private var toolPanelContainerBasePaddingRight = 0
+    private var toolPanelContainerBasePaddingBottom = 0
     private var isApplyingZipPreset = false
+    private var isDirectCleanupMode = false
+    private var pendingCleanupRemovedPages: Set<Int> = emptySet()
+    private var cleanupGridAdapter: CleanupPagesGridAdapter? = null
+    private var cleanupRenderer: PdfiumPageRenderer? = null
+    private val cleanupThumbnailCache = LruCache<Int, Bitmap>(40)
+    private val cleanupHistoryStack = mutableListOf<Set<Int>>()
+    private val cleanupRedoStack = mutableListOf<Set<Int>>()
+    private val cleanupDeletedPages = mutableSetOf<Int>()
 
     private val pickPdfLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -279,47 +304,24 @@ class MainActivity : AppCompatActivity() {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            setLoading(true, getString(R.string.preparing_local_pdf))
-            lifecycleScope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    runCatching {
-                        LocalPdfStore.prepareForRead(
-                            context = this@MainActivity,
-                            sourceUri = uri,
-                            preferredDisplayName = resolvedPdfName,
-                            refreshExisting = true
-                        )
-                    }
-                }
-
-                setLoading(false)
-                result.onSuccess { localPdf ->
-                    selectedPdfUri = localPdf.uri
-                    selectedPdfName = resolvedPdfName.ifBlank { localPdf.displayName }
-                    pendingExportOptions = null
-                    allPageMetrics = emptyList()
-                    displayedPreflightReport = null
-                    updateSelectedPdfState()
-                    hideToolPanel()
-                    analyzePreflightAsync(localPdf.uri)
-                    launchPdfReader(
-                        pdfUri = localPdf.uri,
-                        pdfName = selectedPdfName ?: getString(R.string.fallback_pdf_name),
-                        startInReadMode = true
-                    )
-                }.onFailure { error ->
-                    binding.statusText.text = getString(
-                        R.string.prepare_local_pdf_failed,
-                        error.message ?: getString(R.string.unknown_error)
-                    )
-                    showMessage(
-                        getString(
-                            R.string.prepare_local_pdf_failed,
-                            error.message ?: getString(R.string.unknown_error)
-                        )
-                    )
-                }
-            }
+            // Zero-copy open: hand the original document URI straight to the
+            // reader instead of duplicating the whole file into internal
+            // storage first. Copying broke down on very large PDFs (800 MB -
+            // 1 GB) - it was slow and failed outright when the device lacked
+            // the free space to clone the file. Pdfium reads the URI directly.
+            selectedPdfUri = uri
+            selectedPdfName = resolvedPdfName
+            pendingExportOptions = null
+            allPageMetrics = emptyList()
+            displayedPreflightReport = null
+            updateSelectedPdfState()
+            hideToolPanel()
+            analyzePreflightAsync(uri)
+            launchPdfReader(
+                pdfUri = uri,
+                pdfName = selectedPdfName ?: getString(R.string.fallback_pdf_name),
+                startInReadMode = true
+            )
         }
 
     private val createZipLauncher =
@@ -378,6 +380,26 @@ class MainActivity : AppCompatActivity() {
                     showMessage(error.message ?: getString(R.string.invalid_filters))
                     return@registerForActivityResult
             }
+            editPdfOffline(inputUri, uri, editOptions)
+        }
+
+    private val createCleanedPdfLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+            isDirectCleanupMode = false
+            if (uri == null) {
+                showMessage("Cleanup cancelled")
+                return@registerForActivityResult
+            }
+
+            val inputUri = selectedPdfUri
+            if (inputUri == null) {
+                showMessage(getString(R.string.pick_pdf_first))
+                return@registerForActivityResult
+            }
+
+            val editOptions = EditOptions(
+                filterOptions = FilterOptions(removedPages = pendingCleanupRemovedPages)
+            )
             editPdfOffline(inputUri, uri, editOptions)
         }
 
@@ -558,6 +580,7 @@ class MainActivity : AppCompatActivity() {
     private val visualPagePickerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode != Activity.RESULT_OK) {
+                isDirectCleanupMode = false
                 return@registerForActivityResult
             }
 
@@ -566,8 +589,19 @@ class MainActivity : AppCompatActivity() {
                 .orEmpty()
                 .filter { it > 0 }
                 .toSet()
-            binding.removePagesInput.setText(formatPageSelection(removedPages))
-            refreshPreflightPreview()
+
+            if (isDirectCleanupMode) {
+                if (removedPages.isEmpty()) {
+                    isDirectCleanupMode = false
+                    showMessage("No pages selected for removal")
+                    return@registerForActivityResult
+                }
+                pendingCleanupRemovedPages = removedPages
+                createCleanedPdfLauncher.launch(buildCleanedPdfFileName(selectedPdfName))
+            } else {
+                binding.removePagesInput.setText(formatPageSelection(removedPages))
+                refreshPreflightPreview()
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -584,10 +618,7 @@ class MainActivity : AppCompatActivity() {
         setupFilterWatchers()
         setupToolPanel()
         setupSettingsShortcut()
-
-        binding.pickPdfButton.setOnClickListener {
-            pickPdfLauncher.launch(arrayOf("application/pdf"))
-        }
+        showPendingCrashReport()
 
         binding.openPdfButton.setOnClickListener {
             val currentUri = selectedPdfUri ?: return@setOnClickListener
@@ -612,13 +643,47 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        binding.clearSelectedPdfButton.setOnClickListener {
+            selectedPdfUri = null
+            selectedPdfName = null
+            allPageMetrics = emptyList()
+            displayedPreflightReport = null
+            updateSelectedPdfState()
+            hideToolPanel()
+        }
+
         binding.selectedFileCard.setOnClickListener {
-            val currentUri = selectedPdfUri ?: return@setOnClickListener
+            val currentUri = selectedPdfUri
+            if (currentUri != null) {
+                launchPdfReader(
+                    pdfUri = currentUri,
+                    pdfName = selectedPdfName ?: getString(R.string.fallback_pdf_name),
+                    startInReadMode = true
+                )
+            } else {
+                pickPdfLauncher.launch(arrayOf("application/pdf"))
+            }
+        }
+
+        binding.selectPdfButton.setOnClickListener {
+            pickPdfLauncher.launch(arrayOf("application/pdf"))
+        }
+
+        // Initialize horizontal recycler view for recent files
+        recentDocumentsAdapter = RecentDocumentsAdapter { document ->
             launchPdfReader(
-                pdfUri = currentUri,
-                pdfName = selectedPdfName ?: getString(R.string.fallback_pdf_name),
+                pdfUri = Uri.parse(document.uriString),
+                pdfName = LocalPdfStore.presentableDisplayName(document.displayName),
                 startInReadMode = true
             )
+        }
+        binding.recentDocumentsRecyclerView.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        binding.recentDocumentsRecyclerView.adapter = recentDocumentsAdapter
+
+        // Bind searchEditText
+        binding.searchEditText.doAfterTextChanged {
+            renderResumeProjects()
+            renderRecentDocuments()
         }
 
         binding.exportZipButton.setOnClickListener {
@@ -629,37 +694,11 @@ class MainActivity : AppCompatActivity() {
             showToolPanel(ToolPanelMode.COMPRESS)
         }
 
-        binding.preflightButton.setOnClickListener {
-            showToolPanel(ToolPanelMode.PREFLIGHT)
+        binding.moreToolsButton.setOnClickListener {
+            showMoreToolsBottomSheet()
         }
 
-        binding.cropPageButton.setOnClickListener {
-            showCropPageDialog()
-        }
-
-        binding.duplicatePageButton.setOnClickListener {
-            showDuplicatePageDialog()
-        }
-
-        binding.mergePdfButton.setOnClickListener {
-            pickMergePdfsLauncher.launch(arrayOf("application/pdf"))
-        }
-
-        binding.splitPdfButton.setOnClickListener {
-            showSplitPdfDialog()
-        }
-
-        binding.batchCompressButton.setOnClickListener {
-            pickBatchPdfsLauncher.launch(arrayOf("application/pdf"))
-        }
-
-        binding.openVisualPageEditorButton.setOnClickListener {
-            val currentUri = selectedPdfUri ?: return@setOnClickListener
-            launchVisualPagePicker(
-                pdfUri = currentUri,
-                pdfName = selectedPdfName ?: getString(R.string.fallback_pdf_name)
-            )
-        }
+        setupCleanupGrid()
 
         updateSelectedPdfState()
         syncSelectedDocumentFromLibrary()
@@ -684,17 +723,41 @@ class MainActivity : AppCompatActivity() {
         homeContentBasePaddingTop = binding.homeContentContainer.paddingTop
         homeContentBasePaddingRight = binding.homeContentContainer.paddingRight
         homeContentBasePaddingBottom = binding.homeContentContainer.paddingBottom
+
+        stickyHeaderBasePaddingLeft = binding.stickyHeader.paddingLeft
+        stickyHeaderBasePaddingTop = binding.stickyHeader.paddingTop
+        stickyHeaderBasePaddingRight = binding.stickyHeader.paddingRight
+        stickyHeaderBasePaddingBottom = binding.stickyHeader.paddingBottom
+
+        toolPanelContainerBasePaddingLeft = binding.toolPanelContainer.paddingLeft
+        toolPanelContainerBasePaddingTop = binding.toolPanelContainer.paddingTop
+        toolPanelContainerBasePaddingRight = binding.toolPanelContainer.paddingRight
+        toolPanelContainerBasePaddingBottom = binding.toolPanelContainer.paddingBottom
     }
 
     private fun setupWindowInsets() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            
+            binding.stickyHeader.updatePadding(
+                left = stickyHeaderBasePaddingLeft + systemBars.left,
+                top = stickyHeaderBasePaddingTop + systemBars.top,
+                right = stickyHeaderBasePaddingRight + systemBars.right
+            )
+
             binding.homeContentContainer.updatePadding(
                 left = homeContentBasePaddingLeft + systemBars.left,
-                top = homeContentBasePaddingTop + systemBars.top,
+                top = homeContentBasePaddingTop,
                 right = homeContentBasePaddingRight + systemBars.right,
                 bottom = homeContentBasePaddingBottom + systemBars.bottom
+            )
+
+            binding.toolPanelContainer.updatePadding(
+                left = toolPanelContainerBasePaddingLeft + systemBars.left,
+                top = toolPanelContainerBasePaddingTop,
+                right = toolPanelContainerBasePaddingRight + systemBars.right,
+                bottom = toolPanelContainerBasePaddingBottom + systemBars.bottom
             )
             insets
         }
@@ -774,6 +837,7 @@ class MainActivity : AppCompatActivity() {
             refreshZipEstimate()
         }
         binding.removePagesInput.doAfterTextChanged {
+            syncInputToCleanupGrid()
             refreshPreflightPreview()
             refreshZipEstimate()
         }
@@ -912,9 +976,34 @@ class MainActivity : AppCompatActivity() {
             dialogBinding.cropPageCountBadge.text =
                 getString(R.string.viewer_jump_pages_badge, pageCount)
         }
+
+        val selectedPages = mutableSetOf<Int>()
+        val uri = selectedPdfUri ?: return
+        var dialogRenderer: PdfiumPageRenderer? = null
+        val thumbnailCache = LruCache<Int, Bitmap>(20)
+
+        val grid = dialogBinding.cropPagesGrid
+        grid.layoutManager = GridLayoutManager(this, 3)
+
+        var adapter: DialogPagesGridAdapter? = null
+
         val syncActionState = {
             syncCropDialogAction(dialogBinding)
         }
+
+        fun updateCropSelectionStatus() {
+            val count = selectedPages.size
+            if (count == 0) {
+                dialogBinding.cropSelectionStatus.text = "0 pages selected (all pages will be cropped)"
+                dialogBinding.cropPagesInput.setText("")
+            } else {
+                dialogBinding.cropSelectionStatus.text = "$count pages selected"
+                val sorted = selectedPages.map { it + 1 }.sorted()
+                dialogBinding.cropPagesInput.setText(sorted.joinToString(", "))
+            }
+            syncActionState()
+        }
+
         dialogBinding.cropPagesInput.doAfterTextChanged { syncActionState() }
         dialogBinding.cropLeftInput.doAfterTextChanged { syncActionState() }
         dialogBinding.cropTopInput.doAfterTextChanged { syncActionState() }
@@ -922,9 +1011,46 @@ class MainActivity : AppCompatActivity() {
         dialogBinding.cropBottomInput.doAfterTextChanged { syncActionState() }
         syncCropDialogAction(dialogBinding)
 
+        adapter = DialogPagesGridAdapter(
+            scope = lifecycleScope,
+            renderThumbnail = { pageIndex ->
+                thumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return@DialogPagesGridAdapter it }
+                withContext(Dispatchers.IO) {
+                    val activeRenderer = dialogRenderer ?: throw IOException("Renderer not ready")
+                    val bitmap = activeRenderer.renderPage(
+                        pageIndex = pageIndex,
+                        targetWidth = 220f,
+                        maxDimension = 420f,
+                        maxPixels = 100000L
+                    )
+                    thumbnailCache.put(pageIndex, bitmap)
+                    bitmap
+                }
+            },
+            cachedThumbnailBitmap = { pageIndex -> thumbnailCache.get(pageIndex) },
+            isPageSelected = { pageIndex -> selectedPages.contains(pageIndex) },
+            onPageToggled = { pageIndex ->
+                if (selectedPages.contains(pageIndex)) {
+                    selectedPages.remove(pageIndex)
+                } else {
+                    selectedPages.add(pageIndex)
+                }
+                adapter?.notifyItemChanged(pageIndex)
+                updateCropSelectionStatus()
+            },
+            mode = DialogPagesGridAdapter.SelectionMode.CROP
+        )
+        grid.adapter = adapter
+
         val dialog = MaterialAlertDialogBuilder(this)
             .setView(dialogBinding.root)
             .create()
+
+        dialog.setOnDismissListener {
+            dialogRenderer?.close()
+            dialogRenderer = null
+            thumbnailCache.evictAll()
+        }
 
         dialogBinding.cropPageCancelButton.setOnClickListener {
             dialog.dismiss()
@@ -967,7 +1093,25 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
             createCroppedPdfLauncher.launch(buildCroppedPdfFileName(selectedPdfName))
         }
+
+        lifecycleScope.launch {
+            try {
+                val descriptor = LocalPdfStore.openSourceDescriptor(this@MainActivity, uri)
+                    ?: throw IOException("Cannot open PDF descriptor")
+                dialogRenderer = PdfiumPageRenderer.open(descriptor)
+                val pages = (0 until (dialogRenderer?.pageCount ?: 0)).toList()
+                adapter.submitPages(pages)
+                updateCropSelectionStatus()
+            } catch (e: Exception) {
+                showMessage("Failed to load page thumbnails: ${e.message}")
+            }
+        }
+
         dialog.show()
+        dialog.window?.setLayout(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        )
     }
 
     private fun showDuplicatePageDialog() {
@@ -984,9 +1128,66 @@ class MainActivity : AppCompatActivity() {
                 getString(R.string.viewer_jump_pages_badge, pageCount)
         }
 
+        val selectedPages = mutableSetOf<Int>()
+        val uri = selectedPdfUri ?: return
+        var dialogRenderer: PdfiumPageRenderer? = null
+        val thumbnailCache = LruCache<Int, Bitmap>(20)
+
+        val grid = dialogBinding.duplicatePagesGrid
+        grid.layoutManager = GridLayoutManager(this, 3)
+
+        var adapter: DialogPagesGridAdapter? = null
+
+        fun updateDuplicateSelectionStatus() {
+            val count = selectedPages.size
+            dialogBinding.duplicateSelectionStatus.text = "$count pages selected"
+            val sorted = selectedPages.map { it + 1 }.sorted()
+            dialogBinding.duplicatePagesInput.setText(sorted.joinToString(", "))
+
+            dialogBinding.duplicatePageConfirmButton.isEnabled = count > 0
+            dialogBinding.duplicatePageConfirmButton.alpha = if (count > 0) 1.0f else 0.5f
+        }
+
+        adapter = DialogPagesGridAdapter(
+            scope = lifecycleScope,
+            renderThumbnail = { pageIndex ->
+                thumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return@DialogPagesGridAdapter it }
+                withContext(Dispatchers.IO) {
+                    val activeRenderer = dialogRenderer ?: throw IOException("Renderer not ready")
+                    val bitmap = activeRenderer.renderPage(
+                        pageIndex = pageIndex,
+                        targetWidth = 220f,
+                        maxDimension = 420f,
+                        maxPixels = 100000L
+                    )
+                    thumbnailCache.put(pageIndex, bitmap)
+                    bitmap
+                }
+            },
+            cachedThumbnailBitmap = { pageIndex -> thumbnailCache.get(pageIndex) },
+            isPageSelected = { pageIndex -> selectedPages.contains(pageIndex) },
+            onPageToggled = { pageIndex ->
+                if (selectedPages.contains(pageIndex)) {
+                    selectedPages.remove(pageIndex)
+                } else {
+                    selectedPages.add(pageIndex)
+                }
+                adapter?.notifyItemChanged(pageIndex)
+                updateDuplicateSelectionStatus()
+            },
+            mode = DialogPagesGridAdapter.SelectionMode.DUPLICATE
+        )
+        grid.adapter = adapter
+
         val dialog = MaterialAlertDialogBuilder(this)
             .setView(dialogBinding.root)
             .create()
+
+        dialog.setOnDismissListener {
+            dialogRenderer?.close()
+            dialogRenderer = null
+            thumbnailCache.evictAll()
+        }
 
         dialogBinding.duplicatePageCancelButton.setOnClickListener {
             dialog.dismiss()
@@ -1001,7 +1202,25 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
             createDuplicatedPdfLauncher.launch(buildDuplicatedPdfFileName(selectedPdfName))
         }
+
+        lifecycleScope.launch {
+            try {
+                val descriptor = LocalPdfStore.openSourceDescriptor(this@MainActivity, uri)
+                    ?: throw IOException("Cannot open PDF descriptor")
+                dialogRenderer = PdfiumPageRenderer.open(descriptor)
+                val pages = (0 until (dialogRenderer?.pageCount ?: 0)).toList()
+                adapter.submitPages(pages)
+                updateDuplicateSelectionStatus()
+            } catch (e: Exception) {
+                showMessage("Failed to load page thumbnails: ${e.message}")
+            }
+        }
+
         dialog.show()
+        dialog.window?.setLayout(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        )
     }
 
     private fun showSplitPdfDialog() {
@@ -1018,9 +1237,73 @@ class MainActivity : AppCompatActivity() {
                 getString(R.string.viewer_jump_pages_badge, pageCount)
         }
 
+        val cutPages = mutableSetOf<Int>()
+        val uri = selectedPdfUri ?: return
+        var dialogRenderer: PdfiumPageRenderer? = null
+        val thumbnailCache = LruCache<Int, Bitmap>(20)
+
+        val grid = dialogBinding.splitPagesGrid
+        grid.layoutManager = GridLayoutManager(this, 3)
+
+        var adapter: DialogPagesGridAdapter? = null
+
+        fun updateSplitSelectionStatus() {
+            val formatted = formatSplitGroups(cutPages, pageCount)
+            dialogBinding.splitGroupsInput.setText(formatted)
+
+            val groupsCount = if (formatted.isEmpty()) 1 else formatted.split("|").size
+            if (groupsCount > 1) {
+                dialogBinding.splitSelectionStatus.text = "Split into $groupsCount groups: $formatted"
+                dialogBinding.splitPdfConfirmButton.isEnabled = true
+                dialogBinding.splitPdfConfirmButton.alpha = 1.0f
+            } else {
+                dialogBinding.splitSelectionStatus.text = "No split points selected (tap pages to split after them)"
+                dialogBinding.splitPdfConfirmButton.isEnabled = false
+                dialogBinding.splitPdfConfirmButton.alpha = 0.5f
+            }
+        }
+
+        adapter = DialogPagesGridAdapter(
+            scope = lifecycleScope,
+            renderThumbnail = { pageIndex ->
+                thumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return@DialogPagesGridAdapter it }
+                withContext(Dispatchers.IO) {
+                    val activeRenderer = dialogRenderer ?: throw IOException("Renderer not ready")
+                    val bitmap = activeRenderer.renderPage(
+                        pageIndex = pageIndex,
+                        targetWidth = 220f,
+                        maxDimension = 420f,
+                        maxPixels = 100000L
+                    )
+                    thumbnailCache.put(pageIndex, bitmap)
+                    bitmap
+                }
+            },
+            cachedThumbnailBitmap = { pageIndex -> thumbnailCache.get(pageIndex) },
+            isPageSelected = { pageIndex -> cutPages.contains(pageIndex + 1) },
+            onPageToggled = { pageIndex ->
+                val pageNum = pageIndex + 1
+                if (cutPages.contains(pageNum)) {
+                    cutPages.remove(pageNum)
+                } else {
+                    cutPages.add(pageNum)
+                }
+                adapter?.notifyItemChanged(pageIndex)
+                updateSplitSelectionStatus()
+            },
+            mode = DialogPagesGridAdapter.SelectionMode.SPLIT
+        )
+        grid.adapter = adapter
+
         val dialog = MaterialAlertDialogBuilder(this)
             .setView(dialogBinding.root)
             .create()
+
+        dialog.setOnDismissListener {
+            dialogRenderer?.close()
+            dialogRenderer = null
+            thumbnailCache.evictAll()
+        }
 
         dialogBinding.splitPdfCancelButton.setOnClickListener {
             dialog.dismiss()
@@ -1035,7 +1318,25 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
             createSplitZipLauncher.launch(buildSplitZipFileName(selectedPdfName))
         }
+
+        lifecycleScope.launch {
+            try {
+                val descriptor = LocalPdfStore.openSourceDescriptor(this@MainActivity, uri)
+                    ?: throw IOException("Cannot open PDF descriptor")
+                dialogRenderer = PdfiumPageRenderer.open(descriptor)
+                val pages = (0 until (dialogRenderer?.pageCount ?: 0)).toList()
+                adapter.submitPages(pages)
+                updateSplitSelectionStatus()
+            } catch (e: Exception) {
+                showMessage("Failed to load page thumbnails: ${e.message}")
+            }
+        }
+
         dialog.show()
+        dialog.window?.setLayout(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        )
     }
 
     private fun syncCropDialogAction(dialogBinding: DialogCropPageBinding) {
@@ -1087,18 +1388,15 @@ class MainActivity : AppCompatActivity() {
             ToolPanelMode.COMPRESS -> getString(R.string.tool_panel_compress_title)
             ToolPanelMode.PREFLIGHT -> getString(R.string.tool_panel_preflight_title)
         }
-        binding.toolPanelSubtitle.text = when (mode) {
+        val subtitleText = when (mode) {
             ToolPanelMode.EDIT -> getString(R.string.tool_panel_edit_subtitle)
             ToolPanelMode.ZIP -> getString(R.string.tool_panel_zip_subtitle)
             ToolPanelMode.COMPRESS -> getString(R.string.tool_panel_compress_subtitle)
             ToolPanelMode.PREFLIGHT -> getString(R.string.tool_panel_preflight_subtitle)
         }
-        binding.toolPrimaryActionHelper.text = when (mode) {
-            ToolPanelMode.EDIT -> getString(R.string.tool_panel_edit_footer)
-            ToolPanelMode.ZIP -> getString(R.string.tool_panel_zip_footer)
-            ToolPanelMode.COMPRESS -> getString(R.string.tool_panel_compress_footer)
-            ToolPanelMode.PREFLIGHT -> getString(R.string.tool_panel_preflight_footer)
-        }
+        binding.toolPanelSubtitle.text = subtitleText
+        binding.toolPanelSubtitle.isVisible = subtitleText.isNotEmpty()
+
         binding.toolPrimaryActionButton.text = when (mode) {
             ToolPanelMode.EDIT -> getString(R.string.tool_apply_edit)
             ToolPanelMode.ZIP -> getString(R.string.tool_apply_zip)
@@ -1106,7 +1404,6 @@ class MainActivity : AppCompatActivity() {
             ToolPanelMode.PREFLIGHT -> getString(R.string.tool_apply_fix_pdf)
         }
         binding.outputNameRecommendedBadge.isVisible = mode == ToolPanelMode.COMPRESS
-        binding.compressIntroSection.isVisible = mode == ToolPanelMode.COMPRESS
         binding.compressionProfileSection.isVisible = mode == ToolPanelMode.COMPRESS
         binding.editSection.isVisible = mode == ToolPanelMode.EDIT
         binding.cleanupSection.isVisible = mode != ToolPanelMode.PREFLIGHT
@@ -1144,6 +1441,10 @@ class MainActivity : AppCompatActivity() {
             ensurePreflightMetrics()
         }
         refreshPreflightPreview()
+        if (mode != ToolPanelMode.PREFLIGHT) {
+            populateCleanupGrid()
+        }
+        updateRenamePreview()
     }
 
     private fun reorderToolSections(mode: ToolPanelMode) {
@@ -1152,7 +1453,6 @@ class MainActivity : AppCompatActivity() {
                 binding.editSection,
                 binding.cleanupSection,
                 binding.outputNameSection,
-                binding.compressIntroSection,
                 binding.compressionProfileSection,
                 binding.preflightSection,
                 binding.formatSection,
@@ -1160,7 +1460,6 @@ class MainActivity : AppCompatActivity() {
             )
         } else if (mode == ToolPanelMode.COMPRESS) {
             listOf(
-                binding.compressIntroSection,
                 binding.compressionProfileSection,
                 binding.editSection,
                 binding.outputNameSection,
@@ -1175,7 +1474,6 @@ class MainActivity : AppCompatActivity() {
                 binding.cleanupSection,
                 binding.outputNameSection,
                 binding.formatSection,
-                binding.compressIntroSection,
                 binding.compressionProfileSection,
                 binding.preflightSection,
                 binding.resizeSection
@@ -1185,7 +1483,6 @@ class MainActivity : AppCompatActivity() {
                 binding.preflightSection,
                 binding.resizeSection,
                 binding.editSection,
-                binding.compressIntroSection,
                 binding.compressionProfileSection,
                 binding.outputNameSection,
                 binding.cleanupSection,
@@ -1202,6 +1499,7 @@ class MainActivity : AppCompatActivity() {
         lastBackPressedAt = 0L
         activeToolPanelMode = null
         binding.toolPanel.isVisible = false
+        teardownCleanupGrid()
     }
 
     private fun ensurePreflightMetrics() {
@@ -1519,7 +1817,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderResumeProjects() {
         val currentUri = selectedPdfUri?.toString()
+        val searchQuery = binding.searchEditText.text?.toString()?.trim() ?: ""
         val items = resumeEditItems.filterNot { item -> item.resumeUriString == currentUri }
+            .filter { item ->
+                searchQuery.isEmpty() || item.resumeDisplayName.contains(searchQuery, ignoreCase = true)
+            }
         binding.resumeProjectsCountText.text = if (items.isEmpty()) {
             getString(R.string.home_count_active_zero)
         } else {
@@ -1553,33 +1855,24 @@ class MainActivity : AppCompatActivity() {
     private fun renderRecentDocuments() {
         val currentUri = selectedPdfUri?.toString()
         val activeResumeUris = resumeEditItems.map { item -> item.resumeUriString }.toSet()
+        val searchQuery = binding.searchEditText.text?.toString()?.trim() ?: ""
         val items = recentDocuments.filterNot { document ->
             document.uriString == currentUri || document.uriString in activeResumeUris
+        }.filter { document ->
+            searchQuery.isEmpty() || document.displayName.contains(searchQuery, ignoreCase = true)
         }
         binding.recentDocumentsCountText.text = if (items.isEmpty()) {
             getString(R.string.home_count_files_zero)
         } else {
             getString(R.string.home_count_files, items.size)
         }
-        binding.recentDocumentsContainer.removeAllViews()
+        recentDocumentsAdapter.submitDocuments(items)
         binding.recentDocumentsEmptyText.isVisible = items.isEmpty()
-        items.forEach { document ->
-            addDashboardEntry(
-                container = binding.recentDocumentsContainer,
-                badgeText = getString(R.string.home_recent_badge),
-                title = LocalPdfStore.presentableDisplayName(document.displayName),
-                subtitle = "",
-                meta = buildRecentDocumentMeta(document),
-                timeText = formatRelativeTime(document.lastOpenedAt),
-                actionText = getString(R.string.home_action_continue_reader)
-            ) {
-                launchPdfReader(
-                    pdfUri = Uri.parse(document.uriString),
-                    pdfName = LocalPdfStore.presentableDisplayName(document.displayName),
-                    startInReadMode = true
-                )
-            }
-        }
+    }
+
+    override fun onDestroy() {
+        recentDocumentsAdapter.onDestroy()
+        super.onDestroy()
     }
 
     private fun addDashboardEntry(
@@ -1775,16 +2068,14 @@ class MainActivity : AppCompatActivity() {
         setHomeToolEnabled(binding.openPdfButton, hasPdf)
         setHomeToolEnabled(binding.exportZipButton, hasPdf)
         setHomeToolEnabled(binding.compressPdfButton, hasPdf)
-        setHomeToolEnabled(binding.preflightButton, hasPdf)
-        setHomeToolEnabled(binding.cropPageButton, hasPdf)
-        setHomeToolEnabled(binding.duplicatePageButton, hasPdf)
-        setHomeToolEnabled(binding.splitPdfButton, hasPdf)
-        setHomeToolEnabled(binding.mergePdfButton, true)
-        setHomeToolEnabled(binding.batchCompressButton, true)
+        setHomeToolEnabled(binding.moreToolsButton, true)
         binding.selectedReadButton.isEnabled = hasPdf
         binding.selectedEditButton.isEnabled = hasPdf
-        binding.selectedFileCard.isEnabled = hasPdf
-        binding.selectedFileCard.isClickable = hasPdf
+        binding.selectedFileCard.isEnabled = true
+        binding.selectedFileCard.isClickable = true
+        binding.pdfSelectedButtonsLayout.visibility = if (hasPdf) android.view.View.VISIBLE else android.view.View.GONE
+        binding.clearSelectedPdfButton.visibility = if (hasPdf) android.view.View.VISIBLE else android.view.View.GONE
+        binding.selectPdfButton.visibility = android.view.View.GONE
         binding.selectedBadgeText.text = when {
             resumeItem?.isDraft == true -> getString(R.string.home_resume_badge_draft)
             resumeItem != null -> getString(R.string.home_resume_badge_project)
@@ -1830,6 +2121,32 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.home_action_open_editor)
         }
         refreshZipEstimate()
+    }
+
+    private fun showPendingCrashReport() {
+        val report = CrashReporter.consumeReport(this) ?: return
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Last crash report")
+            .setMessage(report)
+            .setPositiveButton("Share") { _, _ ->
+                runCatching {
+                    startActivity(
+                        Intent.createChooser(
+                            CrashReporter.shareIntent(this, report),
+                            "Share crash report",
+                        )
+                    )
+                }.onFailure { showMessage("Could not open share sheet") }
+            }
+            .setNeutralButton("Copy") { _, _ ->
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                clipboard?.setPrimaryClip(
+                    android.content.ClipData.newPlainText("crash", report)
+                )
+                showMessage("Crash report copied")
+            }
+            .setNegativeButton("Dismiss", null)
+            .show()
     }
 
     private fun launchPdfReader(
@@ -3567,15 +3884,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun readAllPageMetrics(uri: Uri): List<PageMetrics> {
-        val localPdf = LocalPdfStore.prepareForRead(this, uri, preferredDisplayNameForUri(uri))
-        ParcelFileDescriptor.open(localPdf.file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            PdfRenderer(descriptor).use { renderer ->
-                if (renderer.pageCount == 0) {
-                    throw IOException(getString(R.string.empty_pdf))
-                }
-                return extractPageMetrics(renderer)
+    private suspend fun readAllPageMetrics(uri: Uri): List<PageMetrics> {
+        // Zero-copy + Pdfium so analysing a huge document never copies it and
+        // never trips the native PdfRenderer crash.
+        val descriptor = LocalPdfStore.openSourceDescriptor(this, uri)
+            ?: throw IOException(getString(R.string.cannot_open_pdf))
+        val renderer = PdfiumPageRenderer.open(descriptor)
+        try {
+            if (renderer.pageCount == 0) {
+                throw IOException(getString(R.string.empty_pdf))
             }
+            val metrics = mutableListOf<PageMetrics>()
+            for (pageIndex in 0 until renderer.pageCount) {
+                val (widthPoints, heightPoints) = renderer.pageSizePoints(pageIndex)
+                metrics += buildPageMetrics(
+                    pageNumber = pageIndex + 1,
+                    widthPoints = widthPoints,
+                    heightPoints = heightPoints
+                )
+            }
+            return metrics
+        } finally {
+            renderer.close()
         }
     }
 
@@ -3997,6 +4327,17 @@ class MainActivity : AppCompatActivity() {
         return "${baseName}_edited.pdf"
     }
 
+    private fun buildCleanedPdfFileName(
+        pdfName: String?
+    ): String {
+        val baseName = pdfName
+            ?.replace(Regex("\\.pdf$", RegexOption.IGNORE_CASE), "")
+            ?.trim()
+            ?.ifBlank { null }
+            ?: "document"
+        return "${baseName}_cleaned.pdf"
+    }
+
     private fun buildPreflightFixedPdfFileName(pdfName: String?): String {
         val baseName = pdfName
             ?.replace(Regex("\\.pdf$", RegexOption.IGNORE_CASE), "")
@@ -4126,21 +4467,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun setLoading(isLoading: Boolean, loadingMessage: String? = null) {
         binding.progressIndicator.isVisible = isLoading
-        binding.pickPdfButton.isEnabled = !isLoading
         setHomeToolEnabled(binding.openPdfButton, !isLoading && selectedPdfUri != null)
         setHomeToolEnabled(binding.exportZipButton, !isLoading && selectedPdfUri != null)
         setHomeToolEnabled(binding.compressPdfButton, !isLoading && selectedPdfUri != null)
-        setHomeToolEnabled(binding.preflightButton, !isLoading && selectedPdfUri != null)
-        setHomeToolEnabled(binding.cropPageButton, !isLoading && selectedPdfUri != null)
-        setHomeToolEnabled(binding.duplicatePageButton, !isLoading && selectedPdfUri != null)
-        setHomeToolEnabled(binding.splitPdfButton, !isLoading && selectedPdfUri != null)
-        setHomeToolEnabled(binding.mergePdfButton, !isLoading)
-        setHomeToolEnabled(binding.batchCompressButton, !isLoading)
-        binding.selectedReadButton.isEnabled = !isLoading && selectedPdfUri != null
-        binding.selectedEditButton.isEnabled = !isLoading && selectedPdfUri != null
+        setHomeToolEnabled(binding.moreToolsButton, !isLoading)
+        val hasPdf = selectedPdfUri != null
+        binding.selectedReadButton.isEnabled = !isLoading && hasPdf
+        binding.selectedEditButton.isEnabled = !isLoading && hasPdf
+        binding.selectedFileCard.isEnabled = !isLoading
+        binding.selectedFileCard.isClickable = !isLoading
+        binding.pdfSelectedButtonsLayout.visibility = if (hasPdf) android.view.View.VISIBLE else android.view.View.GONE
+        binding.clearSelectedPdfButton.visibility = if (!isLoading && hasPdf) android.view.View.VISIBLE else android.view.View.GONE
+        binding.selectPdfButton.visibility = android.view.View.GONE
+        binding.selectPdfButton.isEnabled = !isLoading
         binding.toolPrimaryActionButton.isEnabled = !isLoading
         binding.toolPanelCloseButton.isEnabled = !isLoading
-        binding.openVisualPageEditorButton.isEnabled = !isLoading
+        binding.cleanupUndoButton.isEnabled = !isLoading
+        binding.cleanupRedoButton.isEnabled = !isLoading
         binding.outputNameInput.isEnabled = !isLoading
         binding.skipFirstInput.isEnabled = !isLoading
         binding.skipLastInput.isEnabled = !isLoading
@@ -4182,6 +4525,73 @@ class MainActivity : AppCompatActivity() {
 
     private fun showMessage(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun showMoreToolsBottomSheet() {
+        val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val sheetBinding = com.renameapk.pdfzip.databinding.DialogMoreToolsBinding.inflate(layoutInflater)
+        bottomSheet.setContentView(sheetBinding.root)
+
+        val hasPdf = selectedPdfUri != null
+
+        // Enable/disable tools based on selection state
+        setHomeToolEnabled(sheetBinding.sheetPreflightButton, hasPdf)
+        setHomeToolEnabled(sheetBinding.sheetCropPageButton, hasPdf)
+        setHomeToolEnabled(sheetBinding.sheetDuplicatePageButton, hasPdf)
+        setHomeToolEnabled(sheetBinding.sheetSplitPdfButton, hasPdf)
+        setHomeToolEnabled(sheetBinding.sheetCleanupPageButton, hasPdf)
+        setHomeToolEnabled(sheetBinding.sheetMergePdfButton, true)
+        setHomeToolEnabled(sheetBinding.sheetBatchCompressButton, true)
+
+        sheetBinding.sheetPreflightButton.setOnClickListener {
+            bottomSheet.dismiss()
+            showToolPanel(ToolPanelMode.PREFLIGHT)
+        }
+        sheetBinding.sheetCropPageButton.setOnClickListener {
+            bottomSheet.dismiss()
+            showCropPageDialog()
+        }
+        sheetBinding.sheetDuplicatePageButton.setOnClickListener {
+            bottomSheet.dismiss()
+            showDuplicatePageDialog()
+        }
+        sheetBinding.sheetMergePdfButton.setOnClickListener {
+            bottomSheet.dismiss()
+            pickMergePdfsLauncher.launch(arrayOf("application/pdf"))
+        }
+        sheetBinding.sheetSplitPdfButton.setOnClickListener {
+            bottomSheet.dismiss()
+            showSplitPdfDialog()
+        }
+        sheetBinding.sheetCleanupPageButton.setOnClickListener {
+            bottomSheet.dismiss()
+            val currentUri = selectedPdfUri
+            if (currentUri == null) {
+                showMessage(getString(R.string.pick_pdf_first))
+                return@setOnClickListener
+            }
+            isDirectCleanupMode = true
+            launchVisualPagePicker(
+                pdfUri = currentUri,
+                pdfName = selectedPdfName ?: getString(R.string.fallback_pdf_name)
+            )
+        }
+        sheetBinding.sheetBatchCompressButton.setOnClickListener {
+            bottomSheet.dismiss()
+            pickBatchPdfsLauncher.launch(arrayOf("application/pdf"))
+        }
+
+        bottomSheet.setOnShowListener {
+            val sheetContainer =
+                bottomSheet.findViewById<android.widget.FrameLayout>(com.google.android.material.R.id.design_bottom_sheet)
+                    ?: return@setOnShowListener
+            sheetContainer.setBackgroundColor(Color.TRANSPARENT)
+            com.google.android.material.bottomsheet.BottomSheetBehavior.from(sheetContainer).apply {
+                skipCollapsed = true
+                state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+            }
+        }
+        bottomSheet.show()
     }
 
     companion object {
@@ -4228,4 +4638,500 @@ class MainActivity : AppCompatActivity() {
         private const val FORMAT_MATCH_TOLERANCE_MM = 2.0
         private const val BACK_PRESS_EXIT_WINDOW_MS = 2000L
     }
+
+    private fun setupCleanupGrid() {
+        val grid = binding.cleanupPagesGrid
+        grid.layoutManager = GridLayoutManager(this, 3)
+        cleanupGridAdapter = CleanupPagesGridAdapter(
+            scope = lifecycleScope,
+            renderThumbnail = { pageIndex -> renderCleanupThumbnail(pageIndex) },
+            cachedThumbnailBitmap = { pageIndex -> cleanupThumbnailCache.get(pageIndex) },
+            isPageDeleted = { pageIndex -> cleanupDeletedPages.contains(pageIndex) },
+            onPageToggled = { pageIndex -> toggleCleanupPageDeleted(pageIndex) }
+        )
+        grid.adapter = cleanupGridAdapter
+
+        binding.cleanupUndoButton.setOnClickListener {
+            performCleanupUndo()
+        }
+        binding.cleanupRedoButton.setOnClickListener {
+            performCleanupRedo()
+        }
+        updateCleanupUndoRedoButtonsState()
+
+        binding.outputNameInput.doAfterTextChanged {
+            updateRenamePreview()
+        }
+    }
+
+    private fun populateCleanupGrid() {
+        val uri = selectedPdfUri ?: return
+        
+        if (cleanupGridAdapter == null) {
+            setupCleanupGrid()
+        }
+
+        cleanupDeletedPages.clear()
+        cleanupHistoryStack.clear()
+        cleanupRedoStack.clear()
+        cleanupThumbnailCache.evictAll()
+        
+        val existingText = binding.removePagesInput.text?.toString().orEmpty()
+        val parsed = runCatching { parsePageSelection(existingText) }.getOrDefault(emptySet())
+        val pageCount = currentSelectedDocumentPageCount()
+        val parsed0Indexed = parsed.map { it - 1 }.filter { it >= 0 && it < pageCount }.toSet()
+        cleanupDeletedPages.addAll(parsed0Indexed)
+        
+        lifecycleScope.launch {
+            try {
+                cleanupRenderer?.close()
+                cleanupRenderer = null
+                
+                val descriptor = LocalPdfStore.openSourceDescriptor(this@MainActivity, uri)
+                    ?: throw IOException("Cannot open PDF descriptor")
+                val renderer = PdfiumPageRenderer.open(descriptor)
+                cleanupRenderer = renderer
+                
+                val pages = (0 until renderer.pageCount).toList()
+                cleanupGridAdapter?.submitPages(pages)
+                
+                syncCleanupGridToInput()
+                updateCleanupUndoRedoButtonsState()
+            } catch (e: Exception) {
+                showMessage("Failed to load page thumbnails: ${e.message}")
+            }
+        }
+    }
+
+    private suspend fun renderCleanupThumbnail(pageIndex: Int): Bitmap {
+        cleanupThumbnailCache.get(pageIndex)?.takeIf { !it.isRecycled }?.let { return it }
+        val activeRenderer = cleanupRenderer ?: throw IOException("Renderer not ready")
+
+        return withContext(Dispatchers.IO) {
+            val maxPageBitmapPixels = (Runtime.getRuntime().maxMemory() / 8 / 4)
+            var lastError: Throwable? = null
+            val factors = floatArrayOf(1f, 0.82f, 0.68f, 0.55f, 0.42f)
+            
+            for (factor in factors) {
+                try {
+                    val bitmap = activeRenderer.renderPage(
+                        pageIndex = pageIndex,
+                        targetWidth = 220f,
+                        maxDimension = 420f * factor,
+                        maxPixels = (maxPageBitmapPixels * factor * factor).toLong(),
+                    )
+                    cleanupThumbnailCache.put(pageIndex, bitmap)
+                    return@withContext bitmap
+                } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                    throw cancellation
+                } catch (error: Throwable) {
+                    lastError = error
+                    if (error is OutOfMemoryError) {
+                        cleanupThumbnailCache.evictAll()
+                        System.gc()
+                    }
+                }
+            }
+            throw IOException("Failed to render thumbnail for page $pageIndex", lastError)
+        }
+    }
+
+    private fun toggleCleanupPageDeleted(pageIndex: Int) {
+        saveCleanupHistoryState()
+        if (cleanupDeletedPages.contains(pageIndex)) {
+            cleanupDeletedPages.remove(pageIndex)
+        } else {
+            cleanupDeletedPages.add(pageIndex)
+        }
+        cleanupRedoStack.clear()
+        cleanupGridAdapter?.notifyItemChanged(pageIndex)
+        syncCleanupGridToInput()
+        updateCleanupUndoRedoButtonsState()
+    }
+
+    private fun saveCleanupHistoryState() {
+        cleanupHistoryStack.add(cleanupDeletedPages.toSet())
+        if (cleanupHistoryStack.size > 50) {
+            cleanupHistoryStack.removeAt(0)
+        }
+    }
+
+    private fun performCleanupUndo() {
+        if (cleanupHistoryStack.isNotEmpty()) {
+            cleanupRedoStack.add(cleanupDeletedPages.toSet())
+            val prevState = cleanupHistoryStack.removeAt(cleanupHistoryStack.size - 1)
+            cleanupDeletedPages.clear()
+            cleanupDeletedPages.addAll(prevState)
+            cleanupGridAdapter?.notifyDataSetChanged()
+            syncCleanupGridToInput()
+            updateCleanupUndoRedoButtonsState()
+        }
+    }
+
+    private fun performCleanupRedo() {
+        if (cleanupRedoStack.isNotEmpty()) {
+            cleanupHistoryStack.add(cleanupDeletedPages.toSet())
+            val nextState = cleanupRedoStack.removeAt(cleanupRedoStack.size - 1)
+            cleanupDeletedPages.clear()
+            cleanupDeletedPages.addAll(nextState)
+            cleanupGridAdapter?.notifyDataSetChanged()
+            syncCleanupGridToInput()
+            updateCleanupUndoRedoButtonsState()
+        }
+    }
+
+    private fun updateCleanupUndoRedoButtonsState() {
+        binding.cleanupUndoButton.isEnabled = cleanupHistoryStack.isNotEmpty()
+        binding.cleanupRedoButton.isEnabled = cleanupRedoStack.isNotEmpty()
+        
+        binding.cleanupUndoButton.alpha = if (cleanupHistoryStack.isNotEmpty()) 1.0f else 0.35f
+        binding.cleanupRedoButton.alpha = if (cleanupRedoStack.isNotEmpty()) 1.0f else 0.35f
+    }
+
+    private fun syncCleanupGridToInput() {
+        val userPages = cleanupDeletedPages.map { it + 1 }.sorted()
+        val formatted = userPages.joinToString(", ")
+        
+        val existingText = binding.removePagesInput.text?.toString().orEmpty()
+        val parsedExisting = runCatching { parsePageSelection(existingText) }.getOrDefault(emptySet())
+        val parsedExisting0Indexed = parsedExisting.map { it - 1 }.toSet()
+        if (parsedExisting0Indexed != cleanupDeletedPages) {
+            binding.removePagesInput.setText(formatted)
+        }
+
+        val totalPages = currentSelectedDocumentPageCount()
+        val activeCount = totalPages - cleanupDeletedPages.size
+        binding.cleanupGridPageCount.text = "$activeCount / $totalPages selected"
+    }
+
+    private fun syncInputToCleanupGrid() {
+        val text = binding.removePagesInput.text?.toString().orEmpty()
+        val parsed = runCatching { parsePageSelection(text) }.getOrDefault(emptySet())
+        val parsed0Indexed = parsed.map { it - 1 }.filter { it >= 0 && it < currentSelectedDocumentPageCount() }.toSet()
+        if (cleanupDeletedPages != parsed0Indexed) {
+            cleanupDeletedPages.clear()
+            cleanupDeletedPages.addAll(parsed0Indexed)
+            cleanupGridAdapter?.notifyDataSetChanged()
+            val totalPages = currentSelectedDocumentPageCount()
+            val activeCount = totalPages - cleanupDeletedPages.size
+            binding.cleanupGridPageCount.text = "$activeCount / $totalPages selected"
+            updateCleanupUndoRedoButtonsState()
+        }
+    }
+
+    private fun teardownCleanupGrid() {
+        cleanupRenderer?.close()
+        cleanupRenderer = null
+        cleanupThumbnailCache.evictAll()
+        cleanupGridAdapter?.submitPages(emptyList())
+    }
+
+    private fun updateRenamePreview() {
+        val inputName = binding.outputNameInput.text?.toString().orEmpty().trim()
+        val defaultName = selectedPdfName?.let {
+            if (it.endsWith(".pdf", ignoreCase = true)) {
+                it.substring(0, it.length - 4)
+            } else {
+                it
+            }
+        } ?: "document"
+
+        val activeMode = activeToolPanelMode
+        val isZipMode = activeMode == ToolPanelMode.ZIP
+        val extension = if (isZipMode) ".zip" else ".pdf"
+
+        binding.renamePreviewIcon.setImageResource(
+            if (isZipMode) R.drawable.ic_tool_zip_24 else R.drawable.ic_flat_pdf_icon
+        )
+        binding.renamePreviewIcon.imageTintList = if (isZipMode) {
+            ColorStateList.valueOf(getColor(R.color.title_text))
+        } else {
+            null
+        }
+
+        val finalName = if (inputName.isNotEmpty()) {
+            val cleanInput = inputName
+                .replace(Regex("\\.(zip|pdf)$", RegexOption.IGNORE_CASE), "")
+            cleanInput + extension
+        } else {
+            if (isZipMode) {
+                defaultName + extension
+            } else if (activeMode == ToolPanelMode.COMPRESS) {
+                defaultName + "_compressed" + extension
+            } else {
+                defaultName + "_edited" + extension
+            }
+        }
+        binding.renamePreviewText.text = finalName
+    }
 }
+
+private class CleanupPagesGridAdapter(
+    private val scope: CoroutineScope,
+    private val renderThumbnail: suspend (pageIndex: Int) -> Bitmap,
+    private val cachedThumbnailBitmap: (pageIndex: Int) -> Bitmap?,
+    private val isPageDeleted: (pageIndex: Int) -> Boolean,
+    private val onPageToggled: (pageIndex: Int) -> Unit
+) : RecyclerView.Adapter<CleanupPagesGridAdapter.GridViewHolder>() {
+
+    private val pages = mutableListOf<Int>()
+
+    init {
+        setHasStableIds(true)
+    }
+
+    fun submitPages(newPages: List<Int>) {
+        pages.clear()
+        pages.addAll(newPages)
+        notifyDataSetChanged()
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): GridViewHolder {
+        val binding = ItemPdfGridPageBinding.inflate(
+            LayoutInflater.from(parent.context),
+            parent,
+            false
+        )
+        return GridViewHolder(binding)
+    }
+
+    override fun onBindViewHolder(holder: GridViewHolder, position: Int) {
+        holder.bind(pages[position], position)
+    }
+
+    override fun onViewRecycled(holder: GridViewHolder) {
+        holder.recycle()
+        super.onViewRecycled(holder)
+    }
+
+    override fun getItemCount(): Int = pages.size
+    override fun getItemId(position: Int): Long = pages[position].toLong()
+
+    inner class GridViewHolder(
+        private val binding: ItemPdfGridPageBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
+
+        private var renderJob: Job? = null
+        private var boundPageIndex: Int = RecyclerView.NO_POSITION
+
+        fun bind(pageIndex: Int, displayPosition: Int) {
+            boundPageIndex = pageIndex
+            renderJob?.cancel()
+            binding.gridPageNumber.text = (displayPosition + 1).toString()
+            val context = binding.root.context
+            val deleted = isPageDeleted(pageIndex)
+
+            binding.root.alpha = if (deleted) 0.45f else 1.0f
+
+            binding.gridPageCard.strokeColor = context.getColor(
+                if (deleted) R.color.thumbnail_selected else R.color.thumbnail_unselected
+            )
+            binding.gridPageCard.strokeWidth = 1
+            binding.gridPageCard.setCardBackgroundColor(
+                context.getColor(
+                    if (deleted) R.color.button_secondary_bg else R.color.card_surface_strong
+                )
+            )
+
+            if (deleted) {
+                binding.gridPageDeleteButton.setCardBackgroundColor(ColorStateList.valueOf(context.getColor(R.color.button_secondary_bg)))
+                binding.gridPageDeleteButtonIcon.setImageResource(R.drawable.ic_undo_24)
+                binding.gridPageDeleteButtonIcon.imageTintList = ColorStateList.valueOf(context.getColor(R.color.body_text))
+            } else {
+                binding.gridPageDeleteButton.setCardBackgroundColor(ColorStateList.valueOf(Color.parseColor("#E53935")))
+                binding.gridPageDeleteButtonIcon.setImageResource(R.drawable.ic_delete_24)
+                binding.gridPageDeleteButtonIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
+            }
+
+            binding.root.setOnClickListener {
+                onPageToggled(pageIndex)
+            }
+
+            binding.gridPageDeleteButton.setOnClickListener {
+                onPageToggled(pageIndex)
+            }
+
+            val cachedBitmap = cachedThumbnailBitmap(pageIndex)
+            if (cachedBitmap != null) {
+                binding.gridPageImage.setImageBitmap(cachedBitmap)
+                binding.gridPageLoading.isVisible = false
+                return
+            }
+
+            binding.gridPageImage.setImageDrawable(null)
+            binding.gridPageLoading.isVisible = true
+            renderJob = scope.launch {
+                runCatching { renderThumbnail(pageIndex) }
+                    .onSuccess { bitmap ->
+                        if (boundPageIndex == pageIndex) {
+                            binding.gridPageImage.setImageBitmap(bitmap)
+                            binding.gridPageLoading.isVisible = false
+                        }
+                    }
+                    .onFailure {
+                        if (boundPageIndex == pageIndex) {
+                            binding.gridPageLoading.isVisible = false
+                        }
+                    }
+            }
+        }
+
+        fun recycle() {
+            renderJob?.cancel()
+            renderJob = null
+            binding.gridPageImage.setImageDrawable(null)
+            binding.gridPageLoading.isVisible = false
+        }
+    }
+}
+
+private fun formatSplitGroups(selectedSet: Set<Int>, pageCount: Int): String {
+    if (pageCount <= 0) return ""
+    
+    val groups = mutableListOf<List<Int>>()
+    var currentGroup = mutableListOf<Int>()
+    var isCurrentSelected = selectedSet.contains(1)
+    
+    currentGroup.add(1)
+    for (i in 2..pageCount) {
+        val selected = selectedSet.contains(i)
+        if (selected == isCurrentSelected) {
+            currentGroup.add(i)
+        } else {
+            groups.add(currentGroup)
+            currentGroup = mutableListOf(i)
+            isCurrentSelected = selected
+        }
+    }
+    groups.add(currentGroup)
+    
+    return groups.joinToString(" | ") { group ->
+        if (group.size == 1) {
+            group.first().toString()
+        } else {
+            "${group.first()}-${group.last()}"
+        }
+    }
+}
+
+private class DialogPagesGridAdapter(
+    private val scope: CoroutineScope,
+    private val renderThumbnail: suspend (pageIndex: Int) -> Bitmap,
+    private val cachedThumbnailBitmap: (pageIndex: Int) -> Bitmap?,
+    private val isPageSelected: (pageIndex: Int) -> Boolean,
+    private val onPageToggled: (pageIndex: Int) -> Unit,
+    private val mode: SelectionMode
+) : RecyclerView.Adapter<DialogPagesGridAdapter.GridViewHolder>() {
+
+    enum class SelectionMode {
+        CROP, DUPLICATE, SPLIT
+    }
+
+    private val pages = mutableListOf<Int>()
+
+    init {
+        setHasStableIds(true)
+    }
+
+    fun submitPages(newPages: List<Int>) {
+        pages.clear()
+        pages.addAll(newPages)
+        notifyDataSetChanged()
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): GridViewHolder {
+        val binding = ItemPdfGridPageBinding.inflate(
+            LayoutInflater.from(parent.context),
+            parent,
+            false
+        )
+        return GridViewHolder(binding)
+    }
+
+    override fun onBindViewHolder(holder: GridViewHolder, position: Int) {
+        holder.bind(pages[position], position)
+    }
+
+    override fun onViewRecycled(holder: GridViewHolder) {
+        holder.recycle()
+        super.onViewRecycled(holder)
+    }
+
+    override fun getItemCount(): Int = pages.size
+    override fun getItemId(position: Int): Long = pages[position].toLong()
+
+    inner class GridViewHolder(
+        private val binding: ItemPdfGridPageBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
+
+        private var renderJob: Job? = null
+        private var boundPageIndex: Int = RecyclerView.NO_POSITION
+
+        fun bind(pageIndex: Int, displayPosition: Int) {
+            boundPageIndex = pageIndex
+            renderJob?.cancel()
+            binding.gridPageNumber.text = (displayPosition + 1).toString()
+            val context = binding.root.context
+            val selected = isPageSelected(pageIndex)
+
+            binding.root.alpha = if (selected) 1.0f else 0.65f
+
+            binding.gridPageCard.strokeColor = context.getColor(
+                if (selected) R.color.thumbnail_selected else R.color.thumbnail_unselected
+            )
+            binding.gridPageCard.strokeWidth = if (selected) 3 else 1
+            binding.gridPageCard.setCardBackgroundColor(
+                context.getColor(
+                    if (selected) R.color.button_secondary_bg else R.color.card_surface_strong
+                )
+            )
+
+            binding.gridPageDeleteButton.isVisible = selected
+            if (selected) {
+                binding.gridPageDeleteButton.setCardBackgroundColor(ColorStateList.valueOf(context.getColor(R.color.thumbnail_selected)))
+                binding.gridPageDeleteButtonIcon.setImageResource(R.drawable.ic_check_24)
+                binding.gridPageDeleteButtonIcon.imageTintList = ColorStateList.valueOf(Color.WHITE)
+            }
+
+            binding.root.setOnClickListener {
+                onPageToggled(pageIndex)
+            }
+
+            binding.gridPageDeleteButton.setOnClickListener {
+                onPageToggled(pageIndex)
+            }
+
+            val cachedBitmap = cachedThumbnailBitmap(pageIndex)
+            if (cachedBitmap != null) {
+                binding.gridPageImage.setImageBitmap(cachedBitmap)
+                binding.gridPageLoading.isVisible = false
+                return
+            }
+
+            binding.gridPageImage.setImageDrawable(null)
+            binding.gridPageLoading.isVisible = true
+            renderJob = scope.launch {
+                runCatching { renderThumbnail(pageIndex) }
+                    .onSuccess { bitmap ->
+                        if (boundPageIndex == pageIndex) {
+                            binding.gridPageImage.setImageBitmap(bitmap)
+                            binding.gridPageLoading.isVisible = false
+                        }
+                    }
+                    .onFailure {
+                        if (boundPageIndex == pageIndex) {
+                            binding.gridPageLoading.isVisible = false
+                        }
+                    }
+            }
+        }
+
+        fun recycle() {
+            renderJob?.cancel()
+            renderJob = null
+            binding.gridPageImage.setImageDrawable(null)
+            binding.gridPageLoading.isVisible = false
+        }
+    }
+}
+

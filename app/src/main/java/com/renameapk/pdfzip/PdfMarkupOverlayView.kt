@@ -140,7 +140,7 @@ class PdfMarkupOverlayView @JvmOverloads constructor(
     private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = resources.displayMetrics.density * 2f
-        color = 0xCC1A8CFF.toInt()
+        color = 0xFF2563EB.toInt()
     }
     private val resizeHandleFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -149,7 +149,7 @@ class PdfMarkupOverlayView @JvmOverloads constructor(
     private val resizeHandleStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = resources.displayMetrics.density * 2f
-        color = 0xCC1A8CFF.toInt()
+        color = 0xFF2563EB.toInt()
     }
 
     private var pageMarkupState: PageMarkupState = PageMarkupState()
@@ -246,6 +246,18 @@ class PdfMarkupOverlayView @JvmOverloads constructor(
         activeResizeIndex = -1
         pendingCanvasGesture = false
         setSelectedOperationIndex(-1)
+    }
+
+    fun resetActiveGestures() {
+        val stroke = activeStroke
+        if (stroke != null) {
+            pageMarkupState.operations.remove(stroke)
+            activeStroke = null
+        }
+        activeDragIndex = -1
+        activeResizeIndex = -1
+        pendingCanvasGesture = false
+        invalidate()
     }
 
     fun addText(
@@ -366,13 +378,13 @@ class PdfMarkupOverlayView @JvmOverloads constructor(
         when (operation) {
             is MarkupOperation.Text -> {
                 operation.textSizeRatio =
-                    (operation.textSizeRatio * multiplier).coerceIn(0.018f, 0.14f)
+                    (operation.textSizeRatio * multiplier).coerceIn(0.005f, 0.5f)
                 constrainSelectedTextLike(selectedOperationIndex)
             }
 
             is MarkupOperation.Link -> {
                 operation.textSizeRatio =
-                    (operation.textSizeRatio * multiplier).coerceIn(0.018f, 0.14f)
+                    (operation.textSizeRatio * multiplier).coerceIn(0.005f, 0.5f)
                 constrainSelectedTextLike(selectedOperationIndex)
             }
 
@@ -434,6 +446,22 @@ class PdfMarkupOverlayView @JvmOverloads constructor(
         pendingCanvasGesture = false
         setSelectedOperationIndex(-1)
         onMarkupChanged?.invoke()
+    }
+
+    fun hasSelection(): Boolean {
+        return selectedOperationIndex >= 0
+    }
+
+    fun deleteSelectedElement(): Boolean {
+        val index = selectedOperationIndex
+        if (index in pageMarkupState.operations.indices) {
+            pageMarkupState.operations.removeAt(index)
+            setSelectedOperationIndex(-1)
+            onMarkupChanged?.invoke()
+            invalidate()
+            return true
+        }
+        return false
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1154,7 +1182,7 @@ class PdfMarkupOverlayView @JvmOverloads constructor(
         ) {
             textPaint.color = color
             textPaint.textSize =
-                (minDimension * textSizeRatio).coerceIn(18f, 84f)
+                (minDimension * textSizeRatio).coerceIn(10f, 350f)
             textPaint.typeface = if (isBold) {
                 Typeface.DEFAULT_BOLD
             } else {

@@ -5,22 +5,22 @@
     android:layout_height="match_parent"
     android:background="@drawable/bg_main">
 
-    <androidx.core.widget.NestedScrollView
-        android:id="@+id/homeScrollView"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:clipToPadding="false"
-        android:fillViewport="true">
+        android:orientation="vertical">
 
+        <!-- Sticky Top Header -->
         <LinearLayout
-            android:id="@+id/homeContentContainer"
+            android:id="@+id/stickyHeader"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:background="@color/home_header_surface"
             android:orientation="vertical"
             android:paddingStart="22dp"
-            android:paddingTop="24dp"
+            android:paddingTop="20dp"
             android:paddingEnd="22dp"
-            android:paddingBottom="22dp">
+            android:paddingBottom="14dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -30,173 +30,249 @@
 
                 <ImageView
                     android:id="@+id/homeBrandBadge"
-                    android:layout_width="44dp"
-                    android:layout_height="44dp"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
                     android:clickable="true"
                     android:contentDescription="@string/app_name"
                     android:focusable="true"
                     android:foreground="?attr/selectableItemBackgroundBorderless"
                     android:scaleType="fitCenter"
-                    android:src="@drawable/ic_pocket_pdf_brand"
-                    android:tooltipText="@string/home_settings_open" />
+                    android:src="@drawable/ic_pocket_pdf_brand" />
 
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/app_name"
+                    android:textColor="@color/home_header_title"
+                    android:textSize="20sp"
+                    android:textStyle="bold" />
+
+                <!-- Search bar on Right - responsive width layout -->
                 <LinearLayout
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
+                    android:layout_height="38dp"
                     android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/app_name"
-                        android:textColor="@color/title_text"
-                        android:textSize="22sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="@string/app_subtitle"
-                        android:textColor="@color/body_text"
-                        android:textSize="13sp" />
-                </LinearLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/pickPdfButton"
-                    style="@style/Widget.PDFZipExporter.Button.Outline"
-                    android:layout_width="wrap_content"
-                    android:layout_height="44dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="16dp"
-                    android:paddingEnd="16dp"
-                    android:text="@string/pick_pdf"
-                    app:icon="@drawable/ic_nav_folder_24"
-                    app:iconGravity="textStart"
-                    app:iconPadding="8dp"
-                    app:iconTint="@color/title_text" />
-            </LinearLayout>
-
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/selectedFileCard"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="22dp"
-                app:cardBackgroundColor="@android:color/transparent"
-                app:cardCornerRadius="28dp"
-                app:cardElevation="0dp"
-                app:strokeWidth="0dp">
-
-                <FrameLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/bg_hero_card"
-                    android:padding="20dp">
+                    android:layout_marginStart="16dp"
+                    android:background="@drawable/bg_search_input"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp">
 
                     <ImageView
-                        android:layout_width="34dp"
-                        android:layout_height="34dp"
-                        android:layout_gravity="top|end"
-                        android:contentDescription="@string/app_name"
-                        android:scaleType="fitCenter"
-                        android:src="@drawable/ic_pocket_pdf_brand" />
+                        android:layout_width="16dp"
+                        android:layout_height="16dp"
+                        android:src="@drawable/ic_search_24"
+                        app:tint="@color/home_search_hint" />
 
-                    <LinearLayout
+                    <EditText
+                        android:id="@+id/searchEditText"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:layout_marginStart="6dp"
+                        android:background="@android:color/transparent"
+                        android:hint="Search PDF files..."
+                        android:imeOptions="actionSearch"
+                        android:inputType="text"
+                        android:maxLines="1"
+                        android:textColor="@color/home_search_text"
+                        android:textColorHint="@color/home_search_hint"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <androidx.core.widget.NestedScrollView
+            android:id="@+id/homeScrollView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:id="@+id/homeContentContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- Scrollable Top Card Area -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@color/home_header_surface"
+                    android:orientation="vertical"
+                    android:paddingStart="22dp"
+                    android:paddingTop="12dp"
+                    android:paddingEnd="22dp"
+                    android:paddingBottom="24dp">
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/selectedFileCard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="22dp"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:foreground="?android:attr/selectableItemBackground"
+                    app:cardBackgroundColor="@android:color/transparent"
+                    app:cardCornerRadius="12dp"
+                    app:cardElevation="0dp"
+                    app:strokeWidth="0dp">
+
+                    <FrameLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:id="@+id/selectedBadgeText"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:background="@drawable/bg_home_hero_badge"
-                            android:paddingStart="12dp"
-                            android:paddingTop="6dp"
-                            android:paddingEnd="12dp"
-                            android:paddingBottom="6dp"
-                            android:text="@string/dashboard_selected_title"
-                            android:textColor="@android:color/white"
-                            android:textSize="12sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/selectedPdfText"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="14dp"
-                            android:ellipsize="end"
-                            android:lineSpacingExtra="2dp"
-                            android:maxLines="2"
-                            android:paddingEnd="52dp"
-                            android:text="@string/no_pdf_selected"
-                            android:textColor="@android:color/white"
-                            android:textSize="24sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/statusText"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="8dp"
-                            android:paddingEnd="18dp"
-                            android:text="@string/waiting_for_pdf"
-                            android:textColor="#FFF8F3"
-                            android:textSize="14sp" />
-
-                        <TextView
-                            android:id="@+id/selectedPdfMetaText"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="8dp"
-                            android:paddingEnd="18dp"
-                            android:textColor="#E8FFFFFF"
-                            android:textSize="13sp"
-                            android:visibility="gone" />
-
-                        <TextView
-                            android:id="@+id/selectedPdfLastUsedText"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
-                            android:paddingEnd="18dp"
-                            android:textColor="#D9FFFFFF"
-                            android:textSize="12sp"
-                            android:visibility="gone" />
+                        android:background="@drawable/bg_hero_card"
+                        android:padding="20dp">
 
                         <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="18dp"
-                            android:orientation="horizontal">
+                            android:orientation="vertical">
+
+                            <!-- Top row: Icon + Info + Clear button inline -->
+                            <LinearLayout
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:gravity="center_vertical"
+                                android:orientation="horizontal">
+
+                                <ImageView
+                                    android:id="@+id/selectedPdfIcon"
+                                    android:layout_width="68dp"
+                                    android:layout_height="84dp"
+                                    android:contentDescription="@string/app_name"
+                                    android:scaleType="fitCenter"
+                                    android:src="@drawable/ic_flat_pdf_icon" />
+
+                                <LinearLayout
+                                    android:layout_width="0dp"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginStart="16dp"
+                                    android:layout_marginEnd="8dp"
+                                    android:layout_weight="1"
+                                    android:orientation="vertical">
+
+                                    <TextView
+                                        android:id="@+id/selectedPdfText"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:ellipsize="end"
+                                        android:lineSpacingExtra="2dp"
+                                        android:maxLines="2"
+                                        android:text="@string/no_pdf_selected"
+                                        android:textColor="@color/home_hero_title"
+                                        android:textSize="18sp"
+                                        android:textStyle="bold" />
+
+                                    <TextView
+                                        android:id="@+id/selectedPdfMetaText"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:layout_marginTop="4dp"
+                                        android:textColor="@color/home_hero_body"
+                                        android:textSize="13sp"
+                                        android:visibility="gone" />
+
+                                    <TextView
+                                        android:id="@+id/selectedPdfLastUsedText"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:layout_marginTop="2dp"
+                                        android:textColor="@color/home_hero_body"
+                                        android:textSize="12sp"
+                                        android:visibility="gone" />
+
+                                    <TextView
+                                        android:id="@+id/statusText"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:layout_marginTop="4dp"
+                                        android:text="@string/waiting_for_pdf"
+                                        android:textColor="@color/home_hero_body"
+                                        android:textSize="13sp" />
+
+                                    <TextView
+                                        android:id="@+id/selectedBadgeText"
+                                        android:layout_width="wrap_content"
+                                        android:layout_height="wrap_content"
+                                        android:visibility="gone" />
+                                </LinearLayout>
+
+                                <ImageButton
+                                    android:id="@+id/clearSelectedPdfButton"
+                                    android:layout_width="32dp"
+                                    android:layout_height="32dp"
+                                    android:layout_gravity="top"
+                                    android:background="?attr/selectableItemBackgroundBorderless"
+                                    android:contentDescription="Clear Selection"
+                                    android:src="@drawable/ic_close_24"
+                                    android:visibility="gone"
+                                    app:tint="@color/home_hero_icon_tint" />
+                            </LinearLayout>
+
+                            <!-- Bottom row: Actions spanning full width below metadata -->
+                            <LinearLayout
+                                android:id="@+id/pdfSelectedButtonsLayout"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="16dp"
+                                android:orientation="horizontal"
+                                android:visibility="gone">
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/selectedReadButton"
+                                    style="@style/Widget.PDFZipExporter.Button.HeroSecondary"
+                                    android:layout_width="0dp"
+                                    android:layout_height="40dp"
+                                    android:layout_weight="1"
+                                    android:enabled="false"
+                                    android:text="@string/home_action_open_reader"
+                                    android:textSize="12sp"
+                                    app:cornerRadius="18dp" />
+
+                                <Space
+                                    android:layout_width="12dp"
+                                    android:layout_height="wrap_content" />
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/selectedEditButton"
+                                    style="@style/Widget.PDFZipExporter.Button.HeroSecondary"
+                                    android:layout_width="0dp"
+                                    android:layout_height="40dp"
+                                    android:layout_weight="1"
+                                    android:enabled="false"
+                                    android:text="@string/home_action_open_editor"
+                                    android:textSize="12sp"
+                                    app:cornerRadius="18dp" />
+                            </LinearLayout>
 
                             <com.google.android.material.button.MaterialButton
-                                android:id="@+id/selectedReadButton"
+                                android:id="@+id/selectPdfButton"
                                 style="@style/Widget.PDFZipExporter.Button.HeroSecondary"
-                                android:layout_width="0dp"
-                                android:layout_height="48dp"
-                                android:layout_weight="1"
-                                android:enabled="false"
-                                android:text="@string/home_action_open_reader" />
-
-                            <Space
-                                android:layout_width="12dp"
-                                android:layout_height="wrap_content" />
-
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/selectedEditButton"
-                                style="@style/Widget.PDFZipExporter.Button.HeroPrimary"
-                                android:layout_width="0dp"
-                                android:layout_height="48dp"
-                                android:layout_weight="1"
-                                android:enabled="false"
-                                android:text="@string/home_action_open_editor" />
+                                android:layout_width="match_parent"
+                                android:layout_height="40dp"
+                                android:layout_marginTop="16dp"
+                                android:text="Select PDF"
+                                android:textSize="12sp"
+                                android:visibility="gone"
+                                app:cornerRadius="18dp" />
                         </LinearLayout>
-                    </LinearLayout>
-                </FrameLayout>
-            </com.google.android.material.card.MaterialCardView>
+                    </FrameLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+            </LinearLayout>
+
+            <!-- Light Slate Main Section below -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="22dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="22dp"
+                android:paddingBottom="22dp">
 
             <com.google.android.material.progressindicator.LinearProgressIndicator
                 android:id="@+id/progressIndicator"
@@ -211,360 +287,193 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:text="@string/reader_tools_title"
+                android:layout_marginTop="20dp"
+                android:text="PDF Tools"
                 android:textColor="@color/title_text"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/reader_tools_subtitle"
-                android:textColor="@color/body_text"
-                android:textSize="13sp" />
-
-            <LinearLayout
+            <!-- Tools Card with 2x2 Grid Grid Lines -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
-                android:orientation="horizontal">
+                app:cardBackgroundColor="@color/card_surface"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeColor="@color/card_stroke"
+                app:strokeWidth="1dp">
 
-                <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/openPdfButton"
-                    android:layout_width="0dp"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:foreground="?attr/selectableItemBackground"
-                    app:cardBackgroundColor="@color/tool_indigo_bg"
-                    app:cardCornerRadius="26dp"
-                    app:cardElevation="0dp"
-                    app:strokeColor="@color/card_stroke"
-                    app:strokeWidth="1dp">
+                    android:orientation="vertical">
 
+                    <!-- Row 1 -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:minHeight="128dp"
-                        android:orientation="vertical"
-                        android:padding="16dp">
+                        android:orientation="horizontal">
 
-                        <FrameLayout
-                            android:layout_width="46dp"
-                            android:layout_height="46dp"
-                            android:background="@drawable/bg_tool_circle_indigo">
+                        <!-- Tool 1: Visual Edit -->
+                        <LinearLayout
+                            android:id="@+id/openPdfButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:foreground="?attr/selectableItemBackground"
+                            android:gravity="center"
+                            android:minHeight="96dp"
+                            android:orientation="vertical"
+                            android:padding="12dp">
 
                             <ImageView
-                                android:layout_width="20dp"
-                                android:layout_height="20dp"
-                                android:layout_gravity="center"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
                                 app:srcCompat="@drawable/ic_tool_draw_24"
-                                app:tint="@color/tool_indigo_text" />
-                        </FrameLayout>
+                                app:tint="@color/title_text" />
 
-                        <TextView
-                            android:layout_width="match_parent"
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:text="Visual Edit"
+                                android:textColor="@color/title_text"
+                                android:textSize="13sp"
+                                android:textStyle="bold"
+                                android:gravity="center" />
+                        </LinearLayout>
+
+                        <!-- Vertical Divider -->
+                        <View
+                            android:layout_width="1dp"
+                            android:layout_height="match_parent"
+                            android:background="@color/card_stroke" />
+
+                        <!-- Tool 2: Export ZIP -->
+                        <LinearLayout
+                            android:id="@+id/exportZipButton"
+                            android:layout_width="0dp"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="16dp"
-                            android:text="@string/edit_pdf_home"
-                            android:textColor="@color/title_text"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
-                            android:lineSpacingExtra="2dp"
-                            android:text="@string/home_tool_edit_detail"
-                            android:textColor="@color/body_text"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-
-                <Space
-                    android:layout_width="14dp"
-                    android:layout_height="wrap_content" />
-
-                <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/exportZipButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:foreground="?attr/selectableItemBackground"
-                    app:cardBackgroundColor="@color/tool_blue_bg"
-                    app:cardCornerRadius="26dp"
-                    app:cardElevation="0dp"
-                    app:strokeColor="@color/card_stroke"
-                    app:strokeWidth="1dp">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:minHeight="128dp"
-                        android:orientation="vertical"
-                        android:padding="16dp">
-
-                        <FrameLayout
-                            android:layout_width="46dp"
-                            android:layout_height="46dp"
-                            android:background="@drawable/bg_tool_circle_blue">
+                            android:layout_weight="1"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:foreground="?attr/selectableItemBackground"
+                            android:gravity="center"
+                            android:minHeight="96dp"
+                            android:orientation="vertical"
+                            android:padding="12dp">
 
                             <ImageView
-                                android:layout_width="20dp"
-                                android:layout_height="20dp"
-                                android:layout_gravity="center"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
                                 app:srcCompat="@drawable/ic_tool_zip_24"
-                                app:tint="@color/tool_blue_text" />
-                        </FrameLayout>
+                                app:tint="@color/title_text" />
 
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="16dp"
-                            android:text="@string/export_zip"
-                            android:textColor="@color/title_text"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
-                            android:lineSpacingExtra="2dp"
-                            android:text="@string/viewer_tool_zip_detail"
-                            android:textColor="@color/body_text"
-                            android:textSize="12sp" />
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:text="Export ZIP"
+                                android:textColor="@color/title_text"
+                                android:textSize="13sp"
+                                android:textStyle="bold"
+                                android:gravity="center" />
+                        </LinearLayout>
                     </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-            </LinearLayout>
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:orientation="horizontal">
+                    <!-- Horizontal Divider -->
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:background="@color/card_stroke" />
 
-                <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/compressPdfButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:foreground="?attr/selectableItemBackground"
-                    app:cardBackgroundColor="@color/tool_rose_bg"
-                    app:cardCornerRadius="26dp"
-                    app:cardElevation="0dp"
-                    app:strokeColor="@color/card_stroke"
-                    app:strokeWidth="1dp">
-
+                    <!-- Row 2 -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:minHeight="128dp"
-                        android:orientation="vertical"
-                        android:padding="16dp">
+                        android:orientation="horizontal">
 
-                        <FrameLayout
-                            android:layout_width="46dp"
-                            android:layout_height="46dp"
-                            android:background="@drawable/bg_tool_circle_red">
+                        <!-- Tool 3: Compress -->
+                        <LinearLayout
+                            android:id="@+id/compressPdfButton"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:foreground="?attr/selectableItemBackground"
+                            android:gravity="center"
+                            android:minHeight="96dp"
+                            android:orientation="vertical"
+                            android:padding="12dp">
 
                             <ImageView
-                                android:layout_width="20dp"
-                                android:layout_height="20dp"
-                                android:layout_gravity="center"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
                                 app:srcCompat="@drawable/ic_tool_compress_24"
-                                app:tint="@color/tool_red_text" />
-                        </FrameLayout>
+                                app:tint="@color/title_text" />
 
-                        <TextView
-                            android:layout_width="match_parent"
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:text="Compress"
+                                android:textColor="@color/title_text"
+                                android:textSize="13sp"
+                                android:textStyle="bold"
+                                android:gravity="center" />
+                        </LinearLayout>
+
+                        <!-- Vertical Divider -->
+                        <View
+                            android:layout_width="1dp"
+                            android:layout_height="match_parent"
+                            android:background="@color/card_stroke" />
+
+                        <!-- Tool 4: More -->
+                        <LinearLayout
+                            android:id="@+id/moreToolsButton"
+                            android:layout_width="0dp"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="16dp"
-                            android:text="@string/compress_pdf"
-                            android:textColor="@color/title_text"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
-                            android:lineSpacingExtra="2dp"
-                            android:text="@string/viewer_tool_compress_detail"
-                            android:textColor="@color/body_text"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-
-                <Space
-                    android:layout_width="14dp"
-                    android:layout_height="wrap_content" />
-
-                <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/preflightButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:foreground="?attr/selectableItemBackground"
-                    app:cardBackgroundColor="@color/tool_green_bg"
-                    app:cardCornerRadius="26dp"
-                    app:cardElevation="0dp"
-                    app:strokeColor="@color/card_stroke"
-                    app:strokeWidth="1dp">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:minHeight="128dp"
-                        android:orientation="vertical"
-                        android:padding="16dp">
-
-                        <FrameLayout
-                            android:layout_width="46dp"
-                            android:layout_height="46dp"
-                            android:background="@drawable/bg_tool_circle_green">
+                            android:layout_weight="1"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:foreground="?attr/selectableItemBackground"
+                            android:gravity="center"
+                            android:minHeight="96dp"
+                            android:orientation="vertical"
+                            android:padding="12dp">
 
                             <ImageView
-                                android:layout_width="20dp"
-                                android:layout_height="20dp"
-                                android:layout_gravity="center"
-                                app:srcCompat="@drawable/ic_tool_preflight_24"
-                                app:tint="@color/tool_green_text" />
-                        </FrameLayout>
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
+                                app:srcCompat="@drawable/ic_tool_more_24"
+                                app:tint="@color/title_text" />
 
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="16dp"
-                            android:text="@string/preflight_home"
-                            android:textColor="@color/title_text"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
-                            android:lineSpacingExtra="2dp"
-                            android:text="@string/viewer_tool_preflight_detail"
-                            android:textColor="@color/body_text"
-                            android:textSize="12sp" />
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:text="More"
+                                android:textColor="@color/title_text"
+                                android:textSize="13sp"
+                                android:textStyle="bold"
+                                android:gravity="center" />
+                        </LinearLayout>
                     </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/moreToolsSection"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/more_tools_title"
-                    android:textColor="@color/title_text"
-                    android:textSize="18sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/more_tools_subtitle"
-                    android:textColor="@color/body_text"
-                    android:textSize="13sp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/cropPageButton"
-                        style="@style/Widget.PDFZipExporter.Button.MiniTool"
-                        android:layout_width="0dp"
-                        android:layout_height="48dp"
-                        android:layout_weight="1"
-                        android:text="@string/crop_page_tool"
-                        app:icon="@drawable/ic_tool_crop_24"
-                        app:iconGravity="textStart" />
-
-                    <Space
-                        android:layout_width="10dp"
-                        android:layout_height="wrap_content" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/duplicatePageButton"
-                        style="@style/Widget.PDFZipExporter.Button.MiniTool"
-                        android:layout_width="0dp"
-                        android:layout_height="48dp"
-                        android:layout_weight="1"
-                        android:text="@string/duplicate_page_tool"
-                        app:icon="@drawable/ic_tool_duplicate_24"
-                        app:iconGravity="textStart" />
                 </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/mergePdfButton"
-                        style="@style/Widget.PDFZipExporter.Button.MiniTool"
-                        android:layout_width="0dp"
-                        android:layout_height="48dp"
-                        android:layout_weight="1"
-                        android:text="@string/merge_pdfs_tool"
-                        app:icon="@drawable/ic_tool_merge_24"
-                        app:iconGravity="textStart" />
-
-                    <Space
-                        android:layout_width="10dp"
-                        android:layout_height="wrap_content" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/splitPdfButton"
-                        style="@style/Widget.PDFZipExporter.Button.MiniTool"
-                        android:layout_width="0dp"
-                        android:layout_height="48dp"
-                        android:layout_weight="1"
-                        android:text="@string/split_pdf_tool"
-                        app:icon="@drawable/ic_tool_split_24"
-                        app:iconGravity="textStart" />
-                </LinearLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/batchCompressButton"
-                    style="@style/Widget.PDFZipExporter.Button.MiniTool"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="10dp"
-                    android:text="@string/batch_compress_tool"
-                    app:icon="@drawable/ic_tool_compress_24"
-                    app:iconGravity="textStart" />
-            </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
 
             <LinearLayout
                 android:id="@+id/resumeProjectsSection"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="26dp"
-                android:orientation="vertical">
+                android:orientation="vertical"
+                android:visibility="gone">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -641,7 +550,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="@string/recent_documents_title"
+                        android:text="Recent Files"
                         android:textColor="@color/title_text"
                         android:textSize="18sp"
                         android:textStyle="bold" />
@@ -669,12 +578,17 @@
                     android:textColor="@color/body_text"
                     android:textSize="13sp" />
 
-                <LinearLayout
-                    android:id="@+id/recentDocumentsContainer"
+                <!-- Redesigned Horizontal Scrolling Recent PDF previews -->
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/recentDocumentsRecyclerView"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
-                    android:orientation="vertical" />
+                    android:clipToPadding="false"
+                    android:orientation="horizontal"
+                    android:overScrollMode="never"
+                    android:paddingEnd="12dp"
+                    android:scrollbars="none" />
 
                 <TextView
                     android:id="@+id/recentDocumentsEmptyText"
@@ -727,7 +641,10 @@
                     android:textStyle="bold" />
             </LinearLayout>
         </LinearLayout>
-    </androidx.core.widget.NestedScrollView>
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>
+
+    </LinearLayout>
 
     <FrameLayout
         android:id="@+id/toolPanel"
@@ -748,6 +665,7 @@
             app:cardElevation="0dp">
 
             <LinearLayout
+                android:id="@+id/toolPanelContainer"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:orientation="vertical"
@@ -811,96 +729,6 @@
                         android:layout_height="wrap_content"
                         android:orientation="vertical"
                         android:paddingBottom="8dp">
-
-                        <LinearLayout
-                            android:id="@+id/compressIntroSection"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="vertical"
-                            android:visibility="gone">
-
-                            <com.google.android.material.card.MaterialCardView
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                app:cardBackgroundColor="@color/preflight_loading_bg"
-                                app:cardCornerRadius="18dp"
-                                app:cardElevation="0dp"
-                                app:strokeColor="@color/card_stroke"
-                                app:strokeWidth="1dp">
-
-                                <LinearLayout
-                                    android:layout_width="match_parent"
-                                    android:layout_height="wrap_content"
-                                    android:orientation="vertical"
-                                    android:padding="14dp">
-
-                                    <TextView
-                                        android:layout_width="match_parent"
-                                        android:layout_height="wrap_content"
-                                        android:text="@string/compress_intro_title"
-                                        android:textColor="@color/title_text"
-                                        android:textSize="17sp"
-                                        android:textStyle="bold" />
-
-                                    <TextView
-                                        android:layout_width="match_parent"
-                                        android:layout_height="wrap_content"
-                                        android:layout_marginTop="8dp"
-                                        android:lineSpacingExtra="2dp"
-                                        android:text="@string/compress_intro_body"
-                                        android:textColor="@color/body_text"
-                                        android:textSize="13sp" />
-
-                                    <LinearLayout
-                                        android:layout_width="match_parent"
-                                        android:layout_height="wrap_content"
-                                        android:layout_marginTop="14dp"
-                                        android:orientation="horizontal">
-
-                                        <TextView
-                                            android:layout_width="wrap_content"
-                                            android:layout_height="wrap_content"
-                                            android:background="@drawable/bg_feature_pill"
-                                            android:paddingStart="12dp"
-                                            android:paddingTop="7dp"
-                                            android:paddingEnd="12dp"
-                                            android:paddingBottom="7dp"
-                                            android:text="@string/compress_badge_offline"
-                                            android:textColor="@color/button_secondary_text"
-                                            android:textSize="12sp"
-                                            android:textStyle="bold" />
-
-                                        <TextView
-                                            android:layout_width="wrap_content"
-                                            android:layout_height="wrap_content"
-                                            android:layout_marginStart="8dp"
-                                            android:background="@drawable/bg_feature_pill"
-                                            android:paddingStart="12dp"
-                                            android:paddingTop="7dp"
-                                            android:paddingEnd="12dp"
-                                            android:paddingBottom="7dp"
-                                            android:text="@string/compress_badge_mobile"
-                                            android:textColor="@color/button_secondary_text"
-                                            android:textSize="12sp"
-                                            android:textStyle="bold" />
-
-                                        <TextView
-                                            android:layout_width="wrap_content"
-                                            android:layout_height="wrap_content"
-                                            android:layout_marginStart="8dp"
-                                            android:background="@drawable/bg_feature_pill"
-                                            android:paddingStart="12dp"
-                                            android:paddingTop="7dp"
-                                            android:paddingEnd="12dp"
-                                            android:paddingBottom="7dp"
-                                            android:text="@string/compress_badge_balanced"
-                                            android:textColor="@color/button_secondary_text"
-                                            android:textSize="12sp"
-                                            android:textStyle="bold" />
-                                    </LinearLayout>
-                                </LinearLayout>
-                            </com.google.android.material.card.MaterialCardView>
-                        </LinearLayout>
 
                         <LinearLayout
                             android:id="@+id/compressionProfileSection"
@@ -1210,55 +1038,78 @@
                                     android:orientation="vertical"
                                     android:padding="14dp">
 
-                                    <com.google.android.material.card.MaterialCardView
+                                    <!-- Embedded Page Grid Header -->
+                                    <LinearLayout
                                         android:layout_width="match_parent"
                                         android:layout_height="wrap_content"
-                                        app:cardBackgroundColor="@color/button_secondary_bg"
-                                        app:cardCornerRadius="18dp"
-                                        app:cardElevation="0dp"
-                                        app:strokeColor="@color/card_stroke"
-                                        app:strokeWidth="1dp">
+                                        android:gravity="center_vertical"
+                                        android:orientation="horizontal"
+                                        android:layout_marginBottom="8dp">
 
-                                        <LinearLayout
-                                            android:layout_width="match_parent"
+                                        <TextView
+                                            android:id="@+id/cleanupGridTitle"
+                                            android:layout_width="wrap_content"
                                             android:layout_height="wrap_content"
-                                            android:orientation="vertical"
-                                            android:padding="14dp">
+                                            android:text="Visual Page Selection"
+                                            android:textColor="@color/title_text"
+                                            android:textSize="14sp"
+                                            android:textStyle="bold" />
 
-                                            <TextView
-                                                android:layout_width="match_parent"
-                                                android:layout_height="wrap_content"
-                                                android:text="@string/filter_visual_editor_title"
-                                                android:textColor="@color/title_text"
-                                                android:textSize="14sp"
-                                                android:textStyle="bold" />
+                                        <TextView
+                                            android:id="@+id/cleanupGridPageCount"
+                                            android:layout_width="wrap_content"
+                                            android:layout_height="wrap_content"
+                                            android:layout_marginStart="8dp"
+                                            android:background="@drawable/bg_status_panel"
+                                            android:paddingStart="6dp"
+                                            android:paddingTop="2dp"
+                                            android:paddingEnd="6dp"
+                                            android:paddingBottom="2dp"
+                                            android:textColor="@color/body_text"
+                                            android:textSize="11sp"
+                                            android:textStyle="bold" />
 
-                                            <TextView
-                                                android:layout_width="match_parent"
-                                                android:layout_height="wrap_content"
-                                                android:layout_marginTop="6dp"
-                                                android:text="@string/filter_visual_editor_helper"
-                                                android:textColor="@color/body_text"
-                                                android:textSize="12sp" />
+                                        <Space
+                                            android:layout_width="0dp"
+                                            android:layout_height="wrap_content"
+                                            android:layout_weight="1" />
 
-                                            <com.google.android.material.button.MaterialButton
-                                                android:id="@+id/openVisualPageEditorButton"
-                                                style="@style/Widget.PDFZipExporter.Button.MiniTool"
-                                                android:layout_width="match_parent"
-                                                android:layout_height="44dp"
-                                                android:layout_marginTop="12dp"
-                                                android:text="@string/filter_visual_editor_action"
-                                                app:icon="@drawable/ic_tool_jump_24"
-                                                app:iconGravity="textStart" />
-                                        </LinearLayout>
-                                    </com.google.android.material.card.MaterialCardView>
+                                        <ImageButton
+                                            android:id="@+id/cleanupUndoButton"
+                                            android:layout_width="36dp"
+                                            android:layout_height="36dp"
+                                            android:background="?attr/selectableItemBackgroundBorderless"
+                                            android:contentDescription="Undo"
+                                            android:src="@drawable/ic_undo_24"
+                                            app:tint="@color/title_text" />
+
+                                        <ImageButton
+                                            android:id="@+id/cleanupRedoButton"
+                                            android:layout_width="36dp"
+                                            android:layout_height="36dp"
+                                            android:layout_marginStart="4dp"
+                                            android:background="?attr/selectableItemBackgroundBorderless"
+                                            android:contentDescription="Redo"
+                                            android:src="@drawable/ic_redo_24"
+                                            app:tint="@color/title_text" />
+                                    </LinearLayout>
+
+                                    <!-- Embedded RecyclerView Grid -->
+                                    <androidx.recyclerview.widget.RecyclerView
+                                        android:id="@+id/cleanupPagesGrid"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="300dp"
+                                        android:clipToPadding="false"
+                                        android:paddingBottom="4dp"
+                                        android:scrollbars="vertical" />
 
                                     <com.google.android.material.textfield.TextInputLayout
                                         style="@style/Widget.PDFZipExporter.TextInputLayout"
                                         android:layout_width="match_parent"
                                         android:layout_height="wrap_content"
                                         android:layout_marginTop="12dp"
-                                        android:hint="@string/skip_first_label">
+                                        android:hint="@string/skip_first_label"
+                                        android:visibility="gone">
 
                                         <com.google.android.material.textfield.TextInputEditText
                                             android:id="@+id/skipFirstInput"
@@ -1276,7 +1127,8 @@
                                         android:layout_width="match_parent"
                                         android:layout_height="wrap_content"
                                         android:layout_marginTop="12dp"
-                                        android:hint="@string/skip_last_label">
+                                        android:hint="@string/skip_last_label"
+                                        android:visibility="gone">
 
                                         <com.google.android.material.textfield.TextInputEditText
                                             android:id="@+id/skipLastInput"
@@ -1295,7 +1147,8 @@
                                         android:layout_height="wrap_content"
                                         android:layout_marginTop="12dp"
                                         android:hint="@string/remove_pages_label"
-                                        app:helperText="@string/remove_pages_helper">
+                                        app:helperText="@string/remove_pages_helper"
+                                        android:visibility="gone">
 
                                         <com.google.android.material.textfield.TextInputEditText
                                             android:id="@+id/removePagesInput"
@@ -1437,23 +1290,75 @@
                                     android:layout_width="match_parent"
                                     android:layout_height="wrap_content"
                                     android:orientation="vertical"
-                                    android:padding="14dp">
+                                    android:padding="16dp">
 
-                                    <TextView
-                                        android:layout_width="wrap_content"
+                                    <!-- Live Preview File Card -->
+                                    <com.google.android.material.card.MaterialCardView
+                                        android:layout_width="match_parent"
                                         android:layout_height="wrap_content"
-                                        android:text="@string/output_name_card_label"
-                                        android:textColor="@color/body_text"
-                                        android:textSize="12sp"
-                                        android:textStyle="bold" />
+                                        app:cardBackgroundColor="@color/button_secondary_bg"
+                                        app:cardCornerRadius="14dp"
+                                        app:cardElevation="0dp"
+                                        app:strokeColor="@color/card_stroke"
+                                        app:strokeWidth="1dp"
+                                        android:layout_marginBottom="12dp">
 
+                                        <LinearLayout
+                                            android:layout_width="match_parent"
+                                            android:layout_height="wrap_content"
+                                            android:gravity="center_vertical"
+                                            android:orientation="horizontal"
+                                            android:padding="12dp">
+
+                                            <ImageView
+                                                android:id="@+id/renamePreviewIcon"
+                                                android:layout_width="32dp"
+                                                android:layout_height="38dp"
+                                                android:scaleType="fitCenter"
+                                                android:src="@drawable/ic_flat_pdf_icon" />
+
+                                            <LinearLayout
+                                                android:layout_width="0dp"
+                                                android:layout_height="wrap_content"
+                                                android:layout_marginStart="12dp"
+                                                android:layout_weight="1"
+                                                android:orientation="vertical">
+
+                                                <TextView
+                                                    android:layout_width="wrap_content"
+                                                    android:layout_height="wrap_content"
+                                                    android:text="Live File Name Preview"
+                                                    android:textColor="@color/body_text"
+                                                    android:textSize="11sp"
+                                                    android:textStyle="bold"
+                                                    android:textAllCaps="true"
+                                                    android:letterSpacing="0.05" />
+
+                                                <TextView
+                                                    android:id="@+id/renamePreviewText"
+                                                    android:layout_width="match_parent"
+                                                    android:layout_height="wrap_content"
+                                                    android:layout_marginTop="2dp"
+                                                    android:ellipsize="middle"
+                                                    android:singleLine="true"
+                                                    android:text="pocketpdf_document.zip"
+                                                    android:textColor="@color/title_text"
+                                                    android:textSize="14sp"
+                                                    android:textStyle="bold" />
+                                            </LinearLayout>
+                                        </LinearLayout>
+                                    </com.google.android.material.card.MaterialCardView>
+
+                                    <!-- Text Input with Start Icon and Clear Button -->
                                     <com.google.android.material.textfield.TextInputLayout
                                         android:id="@+id/outputNameLayout"
                                         style="@style/Widget.PDFZipExporter.TextInputLayout"
                                         android:layout_width="match_parent"
                                         android:layout_height="wrap_content"
-                                        android:layout_marginTop="10dp"
-                                        android:hint="@string/output_name_label">
+                                        android:hint="New File Name"
+                                        app:startIconDrawable="@drawable/ic_nav_folder_24"
+                                        app:startIconTint="@color/body_text"
+                                        app:endIconMode="clear_text">
 
                                         <com.google.android.material.textfield.TextInputEditText
                                             android:id="@+id/outputNameInput"
@@ -1801,13 +1706,7 @@
                     </LinearLayout>
                 </androidx.core.widget.NestedScrollView>
 
-                <TextView
-                    android:id="@+id/toolPrimaryActionHelper"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textColor="@color/body_text"
-                    android:textSize="12sp" />
+
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/toolPrimaryActionButton"

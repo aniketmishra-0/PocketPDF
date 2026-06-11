@@ -26,6 +26,9 @@ class ZoomableImageView @JvmOverloads constructor(
     var onSingleTapPoint: ((Float, Float) -> Boolean)? = null
     var onZoomChanged: ((Boolean) -> Unit)? = null
     var onScaleChanged: ((Float) -> Unit)? = null
+    var onScaleEnd: (() -> Unit)? = null
+
+    var documentZoomScale: Float = 1f
 
     private val drawMatrix = Matrix()
     private val baseMatrix = Matrix()
@@ -85,11 +88,17 @@ class ZoomableImageView @JvmOverloads constructor(
         val drawableHeight = currentDrawable.intrinsicHeight.toFloat().coerceAtLeast(1f)
         val fitWidthScale = viewWidth / drawableWidth
         val fitHeightScale = viewHeight / drawableHeight
-        val scale = if (fitMode == FitMode.FIT_WIDTH) {
+        val baseScale = if (fitMode == FitMode.FIT_WIDTH) {
             fitWidthScale
         } else {
             minOf(fitWidthScale, fitHeightScale)
         }
+        val resetScale = if (documentZoomScale > 1.01f && normalizedScale <= 1.01f) {
+            1.0f
+        } else {
+            documentZoomScale
+        }
+        val scale = baseScale * resetScale
         val shouldTopAlignLandscapePage =
             fitMode == FitMode.FIT_WIDTH ||
                 (drawableWidth > drawableHeight && viewHeight > viewWidth)
@@ -109,7 +118,7 @@ class ZoomableImageView @JvmOverloads constructor(
         normalizedScale = 1f
         updateZoomState()
         if (dispatchScaleChange) {
-            onScaleChanged?.invoke(normalizedScale)
+            onScaleChanged?.invoke(resetScale)
         }
     }
 
@@ -120,6 +129,8 @@ class ZoomableImageView @JvmOverloads constructor(
         }
         val targetScale = scale.coerceIn(MIN_SCALE, MAX_SCALE)
         if (abs(normalizedScale - targetScale) < SCALE_EPSILON) {
+            fixTranslation()
+            imageMatrix = drawMatrix
             return
         }
         scaleImage(
@@ -133,7 +144,7 @@ class ZoomableImageView @JvmOverloads constructor(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w != oldw || h != oldh) {
-            post { resetZoom(currentFitMode, dispatchScaleChange = false) }
+            resetZoom(currentFitMode, dispatchScaleChange = false)
         }
     }
 
@@ -160,22 +171,20 @@ class ZoomableImageView @JvmOverloads constructor(
                 if (event.pointerCount == 1 && isZoomed()) {
                     val deltaX = event.x - lastTouchX
                     val deltaY = event.y - lastTouchY
-                    val drawableRect = currentDrawableRect()
-                    val canPanHorizontally =
-                        drawableRect != null && drawableRect.width() > width.toFloat() + 1f
-                    val canPanVertically =
-                        drawableRect != null && drawableRect.height() > height.toFloat() + 1f
-                    val panX = if (canPanHorizontally) deltaX else 0f
-                    val panY = if (canPanVertically) deltaY else 0f
-                    val shouldPanImage = abs(panX) > 1f || abs(panY) > 1f
-                    if (shouldPanImage) {
-                        drawMatrix.postTranslate(panX, panY)
-                        fixTranslation()
-                        imageMatrix = drawMatrix
-                        isDragging = true
-                        parent?.requestDisallowInterceptTouchEvent(true)
-                    } else {
-                        parent?.requestDisallowInterceptTouchEvent(false)
+                    val absDeltaX = abs(deltaX)
+                    val absDeltaY = abs(deltaY)
+                    if (absDeltaX > 1f || absDeltaY > 1f) {
+                        if (absDeltaX > absDeltaY * 1.2f) {
+                            // Primarily horizontal drag: pan horizontally and lock scroll parent
+                            drawMatrix.postTranslate(deltaX, 0f)
+                            fixTranslation()
+                            imageMatrix = drawMatrix
+                            isDragging = true
+                            parent?.requestDisallowInterceptTouchEvent(true)
+                        } else {
+                            // Primarily vertical drag: let scroll parent (RecyclerView) handle it
+                            parent?.requestDisallowInterceptTouchEvent(false)
+                        }
                     }
                     lastTouchX = event.x
                     lastTouchY = event.y
@@ -184,9 +193,7 @@ class ZoomableImageView @JvmOverloads constructor(
 
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
-                if (!isZoomed()) {
-                    parent?.requestDisallowInterceptTouchEvent(false)
-                }
+                parent?.requestDisallowInterceptTouchEvent(false)
                 if (!isDragging) {
                     performClick()
                 }
@@ -207,15 +214,16 @@ class ZoomableImageView @JvmOverloads constructor(
         focusY: Float,
         dispatchScaleChange: Boolean = true
     ) {
+        val minScale = (1.0f / documentZoomScale).coerceIn(0.1f, 1.0f)
         val previousScale = normalizedScale
-        normalizedScale = (normalizedScale * scaleFactor).coerceIn(MIN_SCALE, MAX_SCALE)
+        normalizedScale = (normalizedScale * scaleFactor).coerceIn(minScale, MAX_SCALE)
         val appliedFactor = normalizedScale / previousScale
         drawMatrix.postScale(appliedFactor, appliedFactor, focusX, focusY)
         fixTranslation()
         imageMatrix = drawMatrix
         updateZoomState()
         if (dispatchScaleChange) {
-            onScaleChanged?.invoke(normalizedScale)
+            onScaleChanged?.invoke(normalizedScale * documentZoomScale)
         }
     }
 
@@ -260,7 +268,7 @@ class ZoomableImageView @JvmOverloads constructor(
             rect.width() > width.toFloat() + 1f ||
                 rect.height() > height.toFloat() + 1f
             )
-        return normalizedScale > 1.01f || fillsBeyondBounds
+        return normalizedScale > 1.01f || documentZoomScale > 1.01f || fillsBeyondBounds
     }
 
     private fun currentDrawableRect(): RectF? {
@@ -300,9 +308,8 @@ class ZoomableImageView @JvmOverloads constructor(
         }
 
         override fun onScaleEnd(detector: ScaleGestureDetector) {
-            if (!isZoomed()) {
-                parent?.requestDisallowInterceptTouchEvent(false)
-            }
+            parent?.requestDisallowInterceptTouchEvent(false)
+            onScaleEnd?.invoke()
         }
     }
 
@@ -321,13 +328,14 @@ class ZoomableImageView @JvmOverloads constructor(
             } else {
                 scaleImage(DOUBLE_TAP_SCALE, e.x, e.y)
             }
+            onScaleEnd?.invoke()
             return true
         }
     }
 
     companion object {
         private const val MIN_SCALE = 1f
-        private const val MAX_SCALE = 4f
+        private const val MAX_SCALE = 6f
         private const val DOUBLE_TAP_SCALE = 2.5f
         private const val SCALE_EPSILON = 0.01f
     }

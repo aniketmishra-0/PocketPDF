@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_grid"
+        android:icon="@drawable/ic_view_sidebar_24"
+        android:title="Layout"
+        app:iconTint="@color/viewer_toolbar_icon"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/action_search"
+        android:icon="@drawable/ic_search_24"
+        android:title="Search"
+        app:iconTint="@color/viewer_toolbar_icon"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/action_share"
+        android:icon="@drawable/ic_tool_share_24"
+        android:title="Share"
+        app:iconTint="@color/viewer_toolbar_icon"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/action_bookmark"
+        android:icon="@drawable/ic_star_outline_20"
+        android:title="Bookmark"
+        app:iconTint="@color/viewer_toolbar_icon"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/action_more"
+        android:icon="@drawable/ic_tool_more_24"
+        android:title="More"
+        app:iconTint="@color/viewer_toolbar_icon"
+        app:showAsAction="always" />
+</menu>

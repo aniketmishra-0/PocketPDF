@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="64dp"
+    android:height="82dp"
+    android:viewportWidth="64"
+    android:viewportHeight="82">
+
+    <!-- Document Page Body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,4h32l14,14v56c0,4.4 -3.6,8 -8,8H12c-4.4,0 -8,-3.6 -8,-8V12c0,-4.4 3.6,-8 8,-8z" />
+
+    <!-- Folded Corner -->
+    <path
+        android:fillColor="#CBD5E1"
+        android:pathData="M44,4v14h14z" />
+
+    <!-- Content Lines (text placeholders) -->
+    <path
+        android:fillColor="#E2E8F0"
+        android:pathData="M14,28h30v2.5H14zM14,34h22v2.5H14zM14,40h26v2.5H14z" />
+
+    <!-- Blue Badge at Bottom -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M8,54h46a4,4 0 0 1 4,4v14a4,4 0 0 1 -4,4H8a4,4 0 0 1 -4,-4V58a4,4 0 0 1 4,-4z" />
+
+    <!-- Letter P (White on Blue) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16,57h8c2.2,0 4,1.8 4,4s-1.8,4 -4,4h-5v8h-3V57zm3,3v3h5c0.6,0 1,-0.4 1,-1v-1c0,-0.6 -0.4,-1 -1,-1h-5z" />
+
+    <!-- Letter D (White on Blue) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M31,57h6c3.3,0 6,2.7 6,6v4c0,3.3 -2.7,6 -6,6h-6V57zm3,3v11h3c1.7,0 3,-1.3 3,-3v-5c0,-1.7 -1.3,-3 -3,-3h-3z" />
+
+    <!-- Letter F (White on Blue) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47,57h10v3H50v5h6v3h-6v5h-3V57z" />
+</vector>

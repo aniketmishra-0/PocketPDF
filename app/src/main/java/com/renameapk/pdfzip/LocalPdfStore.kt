@@ -2,6 +2,7 @@ package com.renameapk.pdfzip
 
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import java.io.File
@@ -136,6 +137,24 @@ object LocalPdfStore {
             "${context.packageName}.fileprovider",
             localFile
         )
+    }
+
+    /**
+     * Opens a read-only descriptor for [uri] WITHOUT copying the file anywhere.
+     *
+     * For huge PDFs (800 MB - 1 GB) the old "copy the whole file into internal
+     * storage first" approach was slow and could fail outright when the device
+     * lacked the free space to duplicate the document. Pdfium can render
+     * straight from this descriptor, so opening is now instant and uses no
+     * extra storage. A real `file://` path is opened directly; everything else
+     * goes through the content resolver.
+     */
+    @Throws(IOException::class)
+    fun openSourceDescriptor(context: Context, uri: Uri): ParcelFileDescriptor? {
+        resolveFileFromUri(uri)?.takeIf { it.exists() }?.let { file ->
+            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
+        return context.contentResolver.openFileDescriptor(uri, "r")
     }
 
     private fun resolveFileFromUri(uri: Uri): File? {

@@ -60,12 +60,14 @@
                 android:textSize="13sp" />
 
             <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/cropPagesInputLayout"
                 style="@style/Widget.PDFZipExporter.TextInputLayout"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
                 android:hint="@string/crop_pages_label"
-                app:helperText="@string/crop_pages_helper">
+                app:helperText="@string/crop_pages_helper"
+                android:visibility="gone">
 
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/cropPagesInput"
@@ -76,6 +78,23 @@
                     android:textColor="@color/title_text"
                     android:textColorHint="@color/body_text" />
             </com.google.android.material.textfield.TextInputLayout>
+
+            <TextView
+                android:id="@+id/cropSelectionStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textColor="@color/body_text"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:text="0 pages selected (all pages will be cropped)" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/cropPagesGrid"
+                android:layout_width="match_parent"
+                android:layout_height="340dp"
+                android:layout_marginTop="8dp"
+                android:scrollbars="vertical" />
 
             <TextView
                 android:layout_width="wrap_content"
