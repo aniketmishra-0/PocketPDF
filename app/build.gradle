@@ -21,8 +21,8 @@ android {
         applicationId "com.pocketpdf.app"
         minSdk 24
         targetSdk 35
-        versionCode 6
-        versionName "1.5"
+        versionCode 7
+        versionName "1.6"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -122,5 +122,21 @@ dependencies {
 
     implementation 'androidx.datastore:datastore-preferences:1.1.1'
     implementation 'androidx.documentfile:documentfile:1.0.1'
-    implementation 'io.legere:pdfiumandroid:1.0.32'
+    implementation 'io.legere:pdfiumandroid:1.0.35'
+}
+
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.24'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24'
+        force 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1'
+        force 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    kotlinOptions {
+        freeCompilerArgs += ["-Xskip-metadata-version-check"]
+    }
 }
