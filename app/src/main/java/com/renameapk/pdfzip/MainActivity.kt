@@ -4112,18 +4112,35 @@ class MainActivity : AppCompatActivity() {
         targetSize: PageSizeSpec,
         quality: Int
     ): ByteArray {
+        // Dynamically adjust render properties based on selected compression quality level
+        val renderDpi = when {
+            quality <= PDF_COMPRESSION_QUALITY_SMALLER -> 96f      // Smaller profile (highly compressed)
+            quality >= PDF_COMPRESSION_QUALITY_BETTER -> 150f      // Better profile (higher resolution)
+            else -> 115f                                           // Balanced profile (optimized middle-ground, was 132f)
+        }
+        val maxDimension = when {
+            quality <= PDF_COMPRESSION_QUALITY_SMALLER -> 1080f
+            quality >= PDF_COMPRESSION_QUALITY_BETTER -> 2048f
+            else -> 1440f
+        }
+        val minScale = when {
+            quality <= PDF_COMPRESSION_QUALITY_SMALLER -> 0.40f
+            quality >= PDF_COMPRESSION_QUALITY_BETTER -> 0.65f
+            else -> 0.50f
+        }
+
         val targetMaxPixels = (
             max(targetSize.widthPoints, targetSize.heightPoints).toFloat() *
-                PDF_COMPRESSION_RENDER_DPI / PDF_POINTS_PER_INCH.toFloat()
-            ).coerceAtMost(PDF_COMPRESSION_MAX_DIMENSION)
+                renderDpi / PDF_POINTS_PER_INCH.toFloat()
+            ).coerceAtMost(maxDimension)
         val currentMax = max(page.width, page.height).toFloat().coerceAtLeast(1f)
         val preferredScale = (targetMaxPixels / currentMax)
-            .coerceIn(PDF_COMPRESSION_MIN_RENDER_SCALE, PDF_COMPRESSION_MAX_RENDER_SCALE)
+            .coerceIn(minScale, PDF_COMPRESSION_MAX_RENDER_SCALE)
         val bitmap = createRenderedBitmap(
             page = page,
             preferredScale = preferredScale,
             maxDimension = targetMaxPixels,
-            minimumScale = PDF_COMPRESSION_MIN_RENDER_SCALE,
+            minimumScale = minScale,
             bitmapConfig = Bitmap.Config.ARGB_8888
         )
         return try {
@@ -4620,9 +4637,9 @@ class MainActivity : AppCompatActivity() {
         private const val FAST_JPEG_QUALITY = 72
         private const val DEFAULT_JPEG_QUALITY = 82
         private const val BEST_JPEG_QUALITY = 92
-        private const val DEFAULT_PDF_COMPRESSION_QUALITY = 72
-        private const val PDF_COMPRESSION_QUALITY_SMALLER = 58
-        private const val PDF_COMPRESSION_QUALITY_BETTER = 86
+        private const val DEFAULT_PDF_COMPRESSION_QUALITY = 70
+        private const val PDF_COMPRESSION_QUALITY_SMALLER = 55
+        private const val PDF_COMPRESSION_QUALITY_BETTER = 85
         private const val PDF_POINTS_PER_INCH = 72.0
         private const val MM_PER_INCH = 25.4
         private const val PREVIEW_DPI = 96.0
