@@ -1813,6 +1813,15 @@ class MainActivity : AppCompatActivity() {
         renderResumeProjects()
         renderRecentDocuments()
         updateSelectedPdfState()
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val activeUris = mutableSetOf<String>()
+            recentDocuments.forEach { activeUris.add(it.uriString) }
+            resumeEditItems.forEach { activeUris.add(it.resumeUriString) }
+            selectedPdfUri?.toString()?.let { activeUris.add(it) }
+            LocalPdfStore.cleanStaleFiles(applicationContext, activeUris)
+            LocalPdfStore.cleanCacheDirectory(applicationContext)
+        }
     }
 
     private fun renderResumeProjects() {

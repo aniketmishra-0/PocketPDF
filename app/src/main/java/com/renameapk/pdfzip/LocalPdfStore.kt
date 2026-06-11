@@ -197,6 +197,35 @@ object LocalPdfStore {
         }
     }
 
+    fun cleanStaleFiles(context: Context, activeUriStrings: Set<String>) {
+        val activeHashes = activeUriStrings.map { sha256(it) }.toSet()
+        val localPdfsDir = File(context.filesDir, LOCAL_DOCUMENTS_DIRECTORY)
+        if (localPdfsDir.exists() && localPdfsDir.isDirectory) {
+            localPdfsDir.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && !activeHashes.contains(dir.name)) {
+                    dir.deleteRecursively()
+                }
+            }
+        }
+    }
+
+    fun cleanCacheDirectory(context: Context) {
+        val cacheDir = context.cacheDir
+        if (cacheDir.exists() && cacheDir.isDirectory) {
+            val oneHourAgo = System.currentTimeMillis() - 3600000L
+            cacheDir.listFiles()?.forEach { file ->
+                if (file.isFile) {
+                    val name = file.name
+                    if ((name.startsWith("temp_reorder_") && name.endsWith(".pdf")) ||
+                        (name.endsWith(".tmp") && file.lastModified() < oneHourAgo)
+                    ) {
+                        file.delete()
+                    }
+                }
+            }
+        }
+    }
+
     private val INVALID_FILE_NAME_CHARS = Regex("[^A-Za-z0-9._-]+")
     private val HEX_PREFIX_PATTERN = Regex("^[0-9a-fA-F]{16,64}[_-]+")
     private const val LOCAL_DOCUMENTS_DIRECTORY = "local_pdfs"

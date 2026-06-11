@@ -136,6 +136,79 @@ class PdfViewerActivity : AppCompatActivity() {
         }
     }
 
+    private var pendingSaveAsTempFile: java.io.File? = null
+    private var pendingSaveAsLocalPdfFile: java.io.File? = null
+    private var pendingSaveAsGridDialog: BottomSheetDialog? = null
+    private var pendingSaveAsTargetPositionAfterSave: Int? = null
+    private var pendingSaveAsReorderedPages: List<Int>? = null
+
+    private val saveAsPdfLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+            val tempFile = pendingSaveAsTempFile
+            val localPdfFile = pendingSaveAsLocalPdfFile
+            val gridDialog = pendingSaveAsGridDialog
+            val targetPositionAfterSave = pendingSaveAsTargetPositionAfterSave
+            val reorderedPages = pendingSaveAsReorderedPages
+            
+            pendingSaveAsTempFile = null
+            pendingSaveAsLocalPdfFile = null
+            pendingSaveAsGridDialog = null
+            pendingSaveAsTargetPositionAfterSave = null
+            pendingSaveAsReorderedPages = null
+            
+            if (uri == null) {
+                tempFile?.delete()
+                Toast.makeText(this, "Save cancelled", Toast.LENGTH_SHORT).show()
+                loadPdf()
+                return@registerForActivityResult
+            }
+            if (tempFile == null || !tempFile.exists() || localPdfFile == null || reorderedPages == null) {
+                Toast.makeText(this, "Failed to save file", Toast.LENGTH_SHORT).show()
+                tempFile?.delete()
+                loadPdf()
+                return@registerForActivityResult
+            }
+            
+            lifecycleScope.launch {
+                val success = withContext(Dispatchers.IO) {
+                    runCatching {
+                        contentResolver.openOutputStream(uri)?.use { os ->
+                            tempFile.inputStream().use { input ->
+                                input.copyTo(os)
+                            }
+                        }
+                        tempFile.copyTo(localPdfFile, overwrite = true)
+                        true
+                    }.getOrDefault(false)
+                }
+                
+                tempFile.delete()
+                if (success) {
+                    gridDialog?.dismiss()
+                    
+                    val newSize = reorderedPages.size
+                    val oldPageIndex = currentPageIndex
+                    val newPageIndex = if (targetPositionAfterSave != null) {
+                        targetPositionAfterSave.coerceIn(0, newSize - 1)
+                    } else {
+                        val newIndexInReordered = reorderedPages.indexOf(oldPageIndex)
+                        if (newIndexInReordered != -1) {
+                            newIndexInReordered
+                        } else {
+                            oldPageIndex.coerceIn(0, newSize - 1)
+                        }
+                    }
+                    
+                    persistReadingProgress(newPageIndex)
+                    loadPdf()
+                    Toast.makeText(this@PdfViewerActivity, "Copy saved successfully", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this@PdfViewerActivity, "Failed to save document", Toast.LENGTH_SHORT).show()
+                    loadPdf()
+                }
+            }
+        }
+
     private val createPageImageLauncher =
         registerForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
             val pageIndex = pendingPageImageExportIndex
@@ -446,6 +519,52 @@ class PdfViewerActivity : AppCompatActivity() {
         dialog.show()
     }
 
+    private sealed class SaveResult {
+        data class Success(val pageCount: Int) : SaveResult()
+        data class PermissionDenied(
+            val tempFile: java.io.File,
+            val localPdfFile: java.io.File,
+            val exception: Throwable?
+        ) : SaveResult()
+    }
+
+    private fun showSaveAsDialog(
+        tempFile: java.io.File,
+        localPdfFile: java.io.File,
+        gridDialog: BottomSheetDialog,
+        targetPositionAfterSave: Int?,
+        reorderedPages: List<Int>
+    ) {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Permission Denied")
+            .setMessage("Cannot overwrite the original file (read-only). Would you like to save your changes to a new PDF file instead?")
+            .setPositiveButton("Save Copy") { _, _ ->
+                pendingSaveAsTempFile = tempFile
+                pendingSaveAsLocalPdfFile = localPdfFile
+                pendingSaveAsGridDialog = gridDialog
+                pendingSaveAsTargetPositionAfterSave = targetPositionAfterSave
+                pendingSaveAsReorderedPages = reorderedPages
+                
+                val sourceDisplayName = LocalPdfStore.queryDisplayName(this, pdfUri ?: Uri.EMPTY) ?: "document"
+                val exportName = if (sourceDisplayName.endsWith(".pdf", ignoreCase = true)) {
+                    sourceDisplayName.substringBeforeLast(".") + "_edited"
+                } else {
+                    sourceDisplayName + "_edited"
+                }
+                
+                saveAsPdfLauncher.launch(exportName)
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                tempFile.delete()
+                loadPdf()
+            }
+            .setOnCancelListener {
+                tempFile.delete()
+                loadPdf()
+            }
+            .show()
+    }
+
     private fun savePagesDirectly(
         dialog: BottomSheetDialog,
         sheetBinding: SheetViewerPagesGridBinding,
@@ -493,37 +612,68 @@ class PdfViewerActivity : AppCompatActivity() {
                             recycleCachedBitmaps()
                         }
                         
-                        context.contentResolver.openOutputStream(currentUri)?.use { os ->
-                            tempFile.inputStream().use { input ->
-                                input.copyTo(os)
+                        var writeToOriginalSuccess = false
+                        var permissionDenialException: Throwable? = null
+                        try {
+                            context.contentResolver.openOutputStream(currentUri)?.use { os ->
+                                tempFile.inputStream().use { input ->
+                                    input.copyTo(os)
+                                }
                             }
-                        } ?: throw IOException("Cannot write to original PDF file")
+                            writeToOriginalSuccess = true
+                        } catch (e: SecurityException) {
+                            permissionDenialException = e
+                        } catch (e: Exception) {
+                            permissionDenialException = e
+                        }
                         
-                        tempFile.copyTo(localPdfFile, overwrite = true)
-                        tempFile.delete()
+                        if (writeToOriginalSuccess) {
+                            tempFile.copyTo(localPdfFile, overwrite = true)
+                            tempFile.delete()
+                            SaveResult.Success(reorderedPages.size)
+                        } else {
+                            SaveResult.PermissionDenied(tempFile, localPdfFile, permissionDenialException)
+                        }
                     }
-                    reorderedPages.size
                 }
             }
             
-            result.onSuccess { newSize ->
-                dialog.dismiss()
-                
-                val oldPageIndex = currentPageIndex
-                val newPageIndex = if (targetPositionAfterSave != null) {
-                    targetPositionAfterSave.coerceIn(0, newSize - 1)
-                } else {
-                    val newIndexInReordered = reorderedPages.indexOf(oldPageIndex)
-                    if (newIndexInReordered != -1) {
-                        newIndexInReordered
-                    } else {
-                        oldPageIndex.coerceIn(0, newSize - 1)
+            result.onSuccess { saveResult ->
+                when (saveResult) {
+                    is SaveResult.Success -> {
+                        dialog.dismiss()
+                        val newSize = saveResult.pageCount
+                        val oldPageIndex = currentPageIndex
+                        val newPageIndex = if (targetPositionAfterSave != null) {
+                            targetPositionAfterSave.coerceIn(0, newSize - 1)
+                        } else {
+                            val newIndexInReordered = reorderedPages.indexOf(oldPageIndex)
+                            if (newIndexInReordered != -1) {
+                                newIndexInReordered
+                            } else {
+                                oldPageIndex.coerceIn(0, newSize - 1)
+                            }
+                        }
+                        
+                        persistReadingProgress(newPageIndex)
+                        loadPdf()
+                        Toast.makeText(this@PdfViewerActivity, "Changes saved successfully", Toast.LENGTH_SHORT).show()
+                    }
+                    is SaveResult.PermissionDenied -> {
+                        dialog.setCancelable(true)
+                        sheetBinding.gridCloseButton.isEnabled = true
+                        sheetBinding.gridEditButton.isEnabled = true
+                        sheetBinding.gridEditButton.text = "Save Changes"
+                        
+                        showSaveAsDialog(
+                            tempFile = saveResult.tempFile,
+                            localPdfFile = saveResult.localPdfFile,
+                            gridDialog = dialog,
+                            targetPositionAfterSave = targetPositionAfterSave,
+                            reorderedPages = reorderedPages
+                        )
                     }
                 }
-                
-                persistReadingProgress(newPageIndex)
-                loadPdf()
-                Toast.makeText(this@PdfViewerActivity, "Changes saved successfully", Toast.LENGTH_SHORT).show()
             }.onFailure { error ->
                 dialog.setCancelable(true)
                 sheetBinding.gridCloseButton.isEnabled = true
@@ -534,6 +684,8 @@ class PdfViewerActivity : AppCompatActivity() {
                     "Failed to save changes: ${error.localizedMessage}",
                     Toast.LENGTH_LONG
                 ).show()
+                // Reload in case the document was closed
+                loadPdf()
             }
         }
     }
